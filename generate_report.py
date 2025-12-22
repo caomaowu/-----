@@ -3,12 +3,11 @@ import cv2
 import win32com.client
 import time
 import numpy as np
+import argparse
+import sys
 
 # --- Configuration ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VIDEO_DIR = os.path.join(BASE_DIR, "视频")
-TEMPLATE_PATH = os.path.join(BASE_DIR, "自动化模板.pptx")
-OUTPUT_PATH = os.path.join(BASE_DIR, "自动化报告_generated.pptx")
 
 # Mapping from Key to Filename
 # The key corresponds to VID_<key> and IMG_<key>
@@ -26,20 +25,24 @@ VIDEO_MAPPING = {
     "rejie": "rejie.mp4",
 }
 
+def log(message):
+    """Helper to print with flush for real-time GUI updates"""
+    print(message, flush=True)
+
 def extract_last_frame(video_path, output_image_path):
     """Extracts the last frame of a video."""
     if not os.path.exists(video_path):
-        print(f"Error: Video not found at {video_path}")
+        log(f"Error: Video not found at {video_path}")
         return False
     
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}")
+        log(f"Error: Could not open video {video_path}")
         return False
     
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if frame_count == 0:
-        print(f"Error: Video {video_path} has 0 frames")
+        log(f"Error: Video {video_path} has 0 frames")
         cap.release()
         return False
 
@@ -53,131 +56,142 @@ def extract_last_frame(video_path, output_image_path):
         is_success, im_buf_arr = cv2.imencode(".png", frame)
         if is_success:
             im_buf_arr.tofile(output_image_path)
-            print(f"Extracted last frame to {output_image_path}")
+            log(f"Extracted last frame to {output_image_path}")
             cap.release()
             return True
         else:
-             print(f"Error: Could not encode frame for {video_path}")
+             log(f"Error: Could not encode frame for {video_path}")
     else:
-        print(f"Error: Could not read last frame of {video_path}")
+        log(f"Error: Could not read last frame of {video_path}")
     
     cap.release()
     return False
 
-def generate_report():
-    print("Starting report generation...")
+def generate_report(video_dir, template_path, output_path):
+    log("Starting report generation...")
+    log(f"Video Directory: {video_dir}")
+    log(f"Template Path: {template_path}")
+    log(f"Output Path: {output_path}")
     
+    if not os.path.exists(video_dir):
+        log(f"Error: Video directory does not exist: {video_dir}")
+        return
+    if not os.path.exists(template_path):
+        log(f"Error: Template file does not exist: {template_path}")
+        return
+
     # 1. Prepare Images
-    print("Step 1: Extracting frames...")
+    log("Step 1: Extracting frames...")
     temp_images = {}
+    
+    # Ensure temp dir exists or use base dir
+    # We'll use the directory where the script is, or system temp. 
+    # Using script dir is safer for now to avoid permission issues.
+    temp_dir = BASE_DIR
+    
     for key, filename in VIDEO_MAPPING.items():
-        video_path = os.path.join(VIDEO_DIR, filename)
-        image_path = os.path.join(BASE_DIR, f"temp_{key}.png")
+        video_path = os.path.join(video_dir, filename)
+        image_path = os.path.join(temp_dir, f"temp_{key}.png")
         
         if os.path.exists(video_path):
             if extract_last_frame(video_path, image_path):
                 temp_images[key] = image_path
         else:
-            print(f"Warning: Video file {filename} missing.")
+            log(f"Warning: Video file {filename} missing in {video_dir}.")
 
     # 2. Open PPT Application
-    print("Step 2: Opening PPT...")
+    log("Step 2: Opening PPT...")
+    ppt_app = None
+    pres = None
     try:
         # Try WPS first as requested in the plan ("WPS PPT")
-        ppt_app = win32com.client.Dispatch("Kwpp.Application")
-        print("Using WPS Presentation.")
-    except Exception:
         try:
-            ppt_app = win32com.client.Dispatch("PowerPoint.Application")
-            print("Using Microsoft PowerPoint.")
+            ppt_app = win32com.client.Dispatch("Kwpp.Application")
+            log("Using WPS Presentation.")
         except Exception:
-            print("Error: Could not open WPS or PowerPoint.")
-            return
+            ppt_app = win32com.client.Dispatch("PowerPoint.Application")
+            log("Using Microsoft PowerPoint.")
+    except Exception:
+        log("Error: Could not open WPS or PowerPoint.")
+        return
 
-    ppt_app.Visible = True
+    try:
+        ppt_app.Visible = True
+    except:
+        pass
     
     try:
-        pres = ppt_app.Presentations.Open(TEMPLATE_PATH)
+        pres = ppt_app.Presentations.Open(template_path)
     except Exception as e:
-        print(f"Error opening template: {e}")
+        log(f"Error opening template: {e}")
         return
 
     # 3. Iterate slides and shapes
-    print("Step 3: Processing slides...")
+    log("Step 3: Processing slides...")
     
     # We collect actions to perform to avoid modifying collection while iterating
     # List of (slide_index, shape_name, action_type, key, left, top, width, height)
     actions = []
 
-    for i, slide in enumerate(pres.Slides):
-        # slide index starts at 1 in COM, but enumerate is 0-based. 
-        # We use slide object directly.
-        for shape in slide.Shapes:
-            name = shape.Name
-            if name.startswith("VID_"):
-                key = name.replace("VID_", "")
-                if key in VIDEO_MAPPING:
-                    actions.append({
-                        "slide_index": i + 1,
-                        "shape_name": name,
-                        "type": "video",
-                        "key": key,
-                        "left": shape.Left,
-                        "top": shape.Top,
-                        "width": shape.Width,
-                        "height": shape.Height
-                    })
-            elif name.startswith("IMG_"):
-                key = name.replace("IMG_", "")
-                if key in VIDEO_MAPPING and key in temp_images:
-                     actions.append({
-                        "slide_index": i + 1,
-                        "shape_name": name,
-                        "type": "image",
-                        "key": key,
-                        "left": shape.Left,
-                        "top": shape.Top,
-                        "width": shape.Width,
-                        "height": shape.Height
-                    })
+    try:
+        for i, slide in enumerate(pres.Slides):
+            # slide index starts at 1 in COM, but enumerate is 0-based. 
+            # We use slide object directly.
+            for shape in slide.Shapes:
+                name = shape.Name
+                if name.startswith("VID_"):
+                    key = name.replace("VID_", "")
+                    if key in VIDEO_MAPPING:
+                        actions.append({
+                            "slide_index": i + 1,
+                            "shape_name": name,
+                            "type": "video",
+                            "key": key,
+                            "left": shape.Left,
+                            "top": shape.Top,
+                            "width": shape.Width,
+                            "height": shape.Height
+                        })
+                elif name.startswith("IMG_"):
+                    key = name.replace("IMG_", "")
+                    if key in VIDEO_MAPPING and key in temp_images:
+                         actions.append({
+                            "slide_index": i + 1,
+                            "shape_name": name,
+                            "type": "image",
+                            "key": key,
+                            "left": shape.Left,
+                            "top": shape.Top,
+                            "width": shape.Width,
+                            "height": shape.Height
+                        })
+    except Exception as e:
+        log(f"Error iterating slides: {e}")
 
     # 4. Execute Actions
-    print(f"Found {len(actions)} anchors to process.")
+    log(f"Found {len(actions)} anchors to process.")
     
     for action in actions:
-        slide = pres.Slides(action["slide_index"])
-        
-        # Remove the placeholder shape
         try:
-            shape = slide.Shapes(action["shape_name"])
-            shape.Delete()
-        except Exception as e:
-            print(f"Warning: Could not delete shape {action['shape_name']}: {e}")
-        
-        # Insert new content
-        try:
+            slide = pres.Slides(action["slide_index"])
+            
+            # Remove the placeholder shape
+            try:
+                shape = slide.Shapes(action["shape_name"])
+                shape.Delete()
+            except Exception as e:
+                log(f"Warning: Could not delete shape {action['shape_name']}: {e}")
+            
+            # Insert new content
             if action["type"] == "video":
-                video_file = os.path.join(VIDEO_DIR, VIDEO_MAPPING[action["key"]])
+                video_file = os.path.join(video_dir, VIDEO_MAPPING[action["key"]])
                 if os.path.exists(video_file):
-                    print(f"Inserting video {video_file} at Slide {action['slide_index']}")
-                    # AddMediaObject(FileName, Left, Top, Width, Height)
-                    # Note: Arguments might vary slightly between versions, but usually this works.
-                    # For strict positioning, we might need to insert then move.
-                    
-                    # Microsoft PPT: AddMediaObject is deprecated/not standard in some versions, AddVideo is newer.
-                    # WPS might behave differently.
-                    # Let's try standard AddMediaObject first, usually works for older compat.
-                    # Or AddVideo2 for newer MS PPT.
-                    
-                    # Safe approach: Insert then resize.
+                    log(f"Inserting video {video_file} at Slide {action['slide_index']}")
                     try:
                         # Try AddVideo (standard in newer Office)
                         new_shape = slide.Shapes.AddMediaObject(video_file, action["left"], action["top"], action["width"], action["height"])
                     except:
-                         # Fallback or specific WPS method?
-                         # Some docs suggest AddMovie for older versions.
-                         # Let's try AddMediaObject again or check methods.
-                         # If it fails, we might just print error.
+                         # Fallback
                          new_shape = slide.Shapes.AddMediaObject2(video_file, False, True, action["left"], action["top"], action["width"], action["height"])
                          
                     # Ensure properties
@@ -188,27 +202,27 @@ def generate_report():
                     
             elif action["type"] == "image":
                 image_file = temp_images[action["key"]]
-                print(f"Inserting image {image_file} at Slide {action['slide_index']}")
+                log(f"Inserting image {image_file} at Slide {action['slide_index']}")
                 new_shape = slide.Shapes.AddPicture(image_file, False, True, action["left"], action["top"], action["width"], action["height"])
         except Exception as e:
-            print(f"Error inserting content for {action['key']}: {e}")
+            log(f"Error inserting content for {action['key']}: {e}")
 
     # 5. Save and Close
-    print("Step 4: Saving report...")
+    log("Step 4: Saving report...")
     
     # Ensure output directory exists and file is removed
-    if os.path.exists(OUTPUT_PATH):
+    if os.path.exists(output_path):
         try:
-            os.remove(OUTPUT_PATH)
+            os.remove(output_path)
         except Exception as e:
-            print(f"Warning: Could not remove existing output file: {e}")
+            log(f"Warning: Could not remove existing output file: {e}")
 
     try:
         # 11 = ppSaveAsOpenXMLPresentation (pptx)
-        pres.SaveAs(OUTPUT_PATH)
-        print(f"Saved to {OUTPUT_PATH}")
+        pres.SaveAs(output_path)
+        log(f"Saved to {output_path}")
     except Exception as e:
-        print(f"Error saving: {e}")
+        log(f"Error saving: {e}")
         
     try:
         pres.Close()
@@ -217,12 +231,22 @@ def generate_report():
         pass
 
     # 6. Cleanup
-    print("Step 5: Cleaning up...")
+    log("Step 5: Cleaning up...")
     for img_path in temp_images.values():
         if os.path.exists(img_path):
-            os.remove(img_path)
+            try:
+                os.remove(img_path)
+            except:
+                pass
     
-    print("Done!")
+    log("Done!")
 
 if __name__ == "__main__":
-    generate_report()
+    parser = argparse.ArgumentParser(description="Generate Automation Report")
+    parser.add_argument("--video_dir", default=os.path.join(BASE_DIR, "视频"), help="Path to video directory")
+    parser.add_argument("--template_path", default=os.path.join(BASE_DIR, "自动化模板.pptx"), help="Path to PPT template")
+    parser.add_argument("--output_path", default=os.path.join(BASE_DIR, "自动化报告_generated.pptx"), help="Path to output PPT")
+    
+    args = parser.parse_args()
+    
+    generate_report(args.video_dir, args.template_path, args.output_path)
