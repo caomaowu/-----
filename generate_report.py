@@ -246,8 +246,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Automation Report")
     parser.add_argument("--video_dir", default=os.path.join(BASE_DIR, "视频"), help="Path to video directory")
     parser.add_argument("--template_path", default=os.path.join(BASE_DIR, "自动化模板.pptx"), help="Path to PPT template")
-    parser.add_argument("--output_path", default=os.path.join(BASE_DIR, "自动化报告_generated.pptx"), help="Path to output PPT")
+    parser.add_argument("--output_path", help="Path to output PPT")
     
     args = parser.parse_args()
+
+    output_path = args.output_path
+    if not output_path:
+        video_folder_name = os.path.basename(os.path.normpath(args.video_dir))
+        current_date = time.strftime("%Y.%m.%d")
+        output_path = os.path.join(BASE_DIR, f"{video_folder_name}-模流分析报告-{current_date}.pptx")
     
-    generate_report(args.video_dir, args.template_path, args.output_path)
+    generate_report(args.video_dir, args.template_path, output_path)

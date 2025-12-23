@@ -89,6 +89,7 @@ python generate_compare_report.py --template 自动化模板.pptx --video_dir �
 | suokonglv.mp4 | PPT第19页 | 最后一帧放在PPT第22页 |
 | suokongtiji.mp4 | PPT第20页 | 最后一帧放在PPT第22页 |
 | rejie.mp4 | PPT第23页 | 最后一帧放在PPT第24页 |
+| qiya.mp4 | PPT第25页 | 最后一帧放在PPT第26页 |
 
 ## 锚点命名规则
 
