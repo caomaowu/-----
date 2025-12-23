@@ -4,6 +4,7 @@ import os
 import subprocess
 import threading
 import sys
+import datetime
 
 class ReportApp:
     def __init__(self, root):
@@ -164,12 +165,14 @@ class ReportApp:
 
     def run_subprocess(self, script, template, video_dir, mode, video_dir_b):
         try:
-            # Construct output path based on template name
-            template_name = os.path.splitext(template)[0]
-            if mode == "对比生成(左右分屏)":
-                output_path = f"{template_name}_compare_generated.pptx"
-            else:
-                output_path = f"{template_name}_generated.pptx"
+            # Generate output filename based on video directory and date
+            # Format: {VideoFolderName}-模流分析报告-{YYYY.MM.DD}.pptx
+            
+            # Normalize path to strip trailing slashes for basename to work
+            video_folder_name = os.path.basename(os.path.normpath(video_dir))
+            current_date = datetime.datetime.now().strftime("%Y.%m.%d")
+            
+            output_path = f"{video_folder_name}-模流分析报告-{current_date}.pptx"
             
             # Absolute paths
             cwd = os.getcwd()
