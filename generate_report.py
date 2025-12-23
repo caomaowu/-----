@@ -188,11 +188,11 @@ def generate_report(video_dir, template_path, output_path):
                 if os.path.exists(video_file):
                     log(f"Inserting video {video_file} at Slide {action['slide_index']}")
                     try:
-                        # Try AddVideo (standard in newer Office)
-                        new_shape = slide.Shapes.AddMediaObject(video_file, action["left"], action["top"], action["width"], action["height"])
+                        # Try AddMediaObject2 first (Explicitly Embed: LinkToFile=False, SaveWithDocument=True)
+                        new_shape = slide.Shapes.AddMediaObject2(video_file, False, True, action["left"], action["top"], action["width"], action["height"])
                     except:
                          # Fallback
-                         new_shape = slide.Shapes.AddMediaObject2(video_file, False, True, action["left"], action["top"], action["width"], action["height"])
+                         new_shape = slide.Shapes.AddMediaObject(video_file, action["left"], action["top"], action["width"], action["height"])
                          
                     # Ensure properties
                     new_shape.Left = action["left"]

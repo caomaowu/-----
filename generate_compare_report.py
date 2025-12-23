@@ -216,9 +216,9 @@ def generate_compare_report(video_dir_a, video_dir_b, template_path, output_path
                 if os.path.exists(video_b):
                     log(f"Inserting B video {video_b} at Slide {action['slide_index']}")
                     try:
-                        s = slide.Shapes.AddMediaObject(video_b, b_left, b_top, b_width, b_height)
-                    except Exception:
                         s = slide.Shapes.AddMediaObject2(video_b, False, True, b_left, b_top, b_width, b_height)
+                    except Exception:
+                        s = slide.Shapes.AddMediaObject(video_b, b_left, b_top, b_width, b_height)
                     s.Left, s.Top, s.Width, s.Height = b_left, b_top, b_width, b_height
                 else:
                     log(f"Warning: Missing B video for {key}: {video_b}")
