@@ -17,6 +17,7 @@ VIDEO_MAPPING = {
     "suokonglv": "suokonglv.mp4",
     "suokongtiji": "suokongtiji.mp4",
     "rejie": "rejie.mp4",
+    "qiya": "qiya.mp4",
 }
 
 
