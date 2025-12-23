@@ -30,6 +30,65 @@ def log(message):
     """Helper to print with flush for real-time GUI updates"""
     print(message, flush=True)
 
+def get_media_size(file_path):
+    """
+    Get original width and height of media file (image or video).
+    Returns: (width, height) or None
+    """
+    if not os.path.exists(file_path):
+        return None
+    
+    # Try as video
+    if file_path.lower().endswith(('.mp4', '.avi', '.mov', '.wmv')):
+        cap = cv2.VideoCapture(file_path)
+        if cap.isOpened():
+            w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            cap.release()
+            if w > 0 and h > 0:
+                return (w, h)
+    
+    # Try as image
+    try:
+        # Use imdecode to handle paths with non-ascii characters if needed, 
+        # though standard imread usually works if locale is set right.
+        # Safe way for windows paths:
+        img = cv2.imdecode(np.fromfile(file_path, dtype=np.uint8), -1)
+        if img is not None:
+            h, w = img.shape[:2]
+            return (w, h)
+    except Exception:
+        pass
+
+    return None
+
+def calculate_centered_rect(container, content_size):
+    """
+    Calculate new rect to fit content inside container while maintaining aspect ratio and centering.
+    container: (left, top, width, height)
+    content_size: (content_width, content_height)
+    Returns: (left, top, width, height)
+    """
+    c_left, c_top, c_width, c_height = container
+    m_width, m_height = content_size
+    
+    if m_width == 0 or m_height == 0:
+        return container
+
+    # Calculate scale to fit
+    scale_w = c_width / m_width
+    scale_h = c_height / m_height
+    scale = min(scale_w, scale_h)
+    
+    new_width = m_width * scale
+    new_height = m_height * scale
+    
+    # Center
+    new_left = c_left + (c_width - new_width) / 2
+    new_top = c_top + (c_height - new_height) / 2
+    
+    return (new_left, new_top, new_width, new_height)
+
 def extract_last_frame(video_path, output_image_path):
     """Extracts the last frame of a video."""
     if not os.path.exists(video_path):
@@ -184,27 +243,41 @@ def generate_report(video_dir, template_path, output_path):
                 log(f"Warning: Could not delete shape {action['shape_name']}: {e}")
             
             # Insert new content
+            
+            # --- Update for Aspect Ratio Fit ---
+            rect = (action["left"], action["top"], action["width"], action["height"])
+            left, top, width, height = rect
+            
             if action["type"] == "video":
                 video_file = os.path.join(video_dir, VIDEO_MAPPING[action["key"]])
                 if os.path.exists(video_file):
+                    size = get_media_size(video_file)
+                    if size:
+                        left, top, width, height = calculate_centered_rect(rect, size)
+                        
                     log(f"Inserting video {video_file} at Slide {action['slide_index']}")
                     try:
                         # Try AddMediaObject2 first (Explicitly Embed: LinkToFile=False, SaveWithDocument=True)
-                        new_shape = slide.Shapes.AddMediaObject2(video_file, False, True, action["left"], action["top"], action["width"], action["height"])
+                        new_shape = slide.Shapes.AddMediaObject2(video_file, False, True, left, top, width, height)
                     except:
                          # Fallback
-                         new_shape = slide.Shapes.AddMediaObject(video_file, action["left"], action["top"], action["width"], action["height"])
+                         new_shape = slide.Shapes.AddMediaObject(video_file, left, top, width, height)
                          
                     # Ensure properties
-                    new_shape.Left = action["left"]
-                    new_shape.Top = action["top"]
-                    new_shape.Width = action["width"]
-                    new_shape.Height = action["height"]
+                    new_shape.Left = left
+                    new_shape.Top = top
+                    new_shape.Width = width
+                    new_shape.Height = height
                     
             elif action["type"] == "image":
                 image_file = temp_images[action["key"]]
+                
+                size = get_media_size(image_file)
+                if size:
+                    left, top, width, height = calculate_centered_rect(rect, size)
+                
                 log(f"Inserting image {image_file} at Slide {action['slide_index']}")
-                new_shape = slide.Shapes.AddPicture(image_file, False, True, action["left"], action["top"], action["width"], action["height"])
+                new_shape = slide.Shapes.AddPicture(image_file, False, True, left, top, width, height)
         except Exception as e:
             log(f"Error inserting content for {action['key']}: {e}")
 
