@@ -79,6 +79,10 @@ class ReportApp:
         self.run_btn = ttk.Button(action_frame, text="开始生成报告", command=self.start_generation)
         self.run_btn.pack(side=tk.RIGHT, padx=5)
         
+        # Author Label
+        self.author_label = ttk.Label(action_frame, text="Designed by 草帽", style="Author.TLabel")
+        self.author_label.pack(side=tk.RIGHT, padx=20)
+        
         self.status_label = ttk.Label(action_frame, text="就绪")
         self.status_label.pack(side=tk.LEFT, padx=5)
 
@@ -134,10 +138,18 @@ class ReportApp:
             self.video_b_label.grid(row=4, column=0, sticky=tk.W)
             self.video_b_entry.grid(row=4, column=1, padx=5, pady=5)
             self.video_b_btn.grid(row=4, column=2, padx=5)
+            
+            # Auto-select compare script
+            if "generate_compare_report.py" in self.script_combo['values']:
+                self.script_combo.set("generate_compare_report.py")
         else:
             self.video_b_label.grid_remove()
             self.video_b_entry.grid_remove()
             self.video_b_btn.grid_remove()
+            
+            # Auto-select normal script
+            if "generate_report.py" in self.script_combo['values']:
+                self.script_combo.set("generate_report.py")
 
     def start_generation(self):
         script = self.script_var.get()
