@@ -1,0 +1,19 @@
+{
+    "video_mapping": {
+        "wendu": {"file": "wendu.mp4", "slide": 4, "img_slide": 5},
+        "juanqi": {"file": "juanqi.mp4", "slide": 6, "img_slide": 8},
+        "tijuanqi": {"file": "tijijuanqi.mp4", "slide": 7, "img_slide": 9},
+        "qipao": {"file": "qipao.mp4", "slide": 10, "img_slide": 11},
+        "yanghuazha": {"file": "yanghuazha.mp4", "slide": 12, "img_slide": 14},
+        "tijiyanghua": {"file": "tijiyanghua.mp4", "slide": 13, "img_slide": 15},
+        "liaoliuzhuizong": {"file": "liaoliuzhuizong.mp4", "slide": 16, "img_slide": 17},
+        "suokong": {"file": "suokong.mp4", "slide": 18, "img_slide": 21},
+        "suokonglv": {"file": "suokonglv.mp4", "slide": 19, "img_slide": 22},
+        "suokongtiji": {"file": "suokongtiji.mp4", "slide": 20, "img_slide": 22},
+        "rejie": {"file": "rejie.mp4", "slide": 23, "img_slide": 24},
+        "qiya": {"file": "qiya.mp4", "slide": 25, "img_slide": 26}
+    },
+    "labels": {
+        "compare_text": "（左）方案一                                                                                （右）方案二"
+    }
+}
