@@ -321,6 +321,40 @@ def generate_compare_report(video_dir_a, video_dir_b, template_path, output_path
                     slide.Shapes.AddPicture(img_b, False, True, b_left, b_top, b_width, b_height)
                 else:
                     log(f"Warning: Missing B image for {key}")
+
+            # 在对比视频/图片下方添加标注文本
+            try:
+                # 计算文本框位置：紧贴实际内容下方
+                # 使用实际内容的底部位置，而不是锚点框的底部位置
+                content_bottom_a = a_top + a_height
+                content_bottom_b = b_top + b_height
+                
+                # 取两个内容中较低的一个作为基准，并添加少量间距
+                text_top = max(content_bottom_a, content_bottom_b) + 2
+                text_left = action["left"]
+                text_width = action["width"]
+                text_height = 30  # 稍微增加高度以容纳字体
+                
+                # 添加文本框
+                textbox = slide.Shapes.AddTextbox(1, text_left, text_top, text_width, text_height)
+                textbox.TextFrame.TextRange.Text = "（左）方案一                                                                                （右）方案二"
+                
+                # 设置文本格式
+                textbox.TextFrame.TextRange.Font.Size = 16
+                textbox.TextFrame.TextRange.Font.Color.RGB = 0x000000  # 黑色
+                textbox.TextFrame.TextRange.Font.Bold = False
+                textbox.TextFrame.TextRange.ParagraphFormat.Alignment = 2  # 居中对齐
+                
+                # 去除文本框内部边距，使文字尽可能贴近上方
+                textbox.TextFrame.MarginTop = 0
+                textbox.TextFrame.MarginBottom = 0
+                
+                # 去掉文本框边框
+                textbox.Line.Visible = 0
+                
+                log(f"Added label text below {action['type']} at Slide {action['slide_index']}")
+            except Exception as e:
+                log(f"Warning: Could not add label text: {e}")
         except Exception as e:
             log(f"Error inserting compare content for {key}: {e}")
 

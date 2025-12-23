@@ -337,6 +337,42 @@ def generate_append_report(existing_ppt_path, video_dir, output_path, gap):
                 s.Width = final_b_width
                 s.Height = final_b_height
                 
+                # 在对比视频下方添加标注文本
+                try:
+                    # 计算文本框位置：紧贴实际内容下方
+                    # 左侧内容底部
+                    content_bottom_a = new_a_top + new_a_height
+                    # 右侧内容底部
+                    content_bottom_b = final_b_top + final_b_height
+                    
+                    # 取两个内容中较低的一个作为基准，并添加少量间距
+                    text_top = max(content_bottom_a, content_bottom_b) + 2
+                    
+                    text_left = container_left
+                    text_width = container_width
+                    text_height = 30  # 稍微增加高度
+                    
+                    # 添加文本框
+                    textbox = slide.Shapes.AddTextbox(1, text_left, text_top, text_width, text_height)
+                    textbox.TextFrame.TextRange.Text = "（左）方案一                                                                                （右）方案二"
+                    
+                    # 设置文本格式
+                    textbox.TextFrame.TextRange.Font.Size = 16
+                    textbox.TextFrame.TextRange.Font.Color.RGB = 0x000000  # 黑色
+                    textbox.TextFrame.TextRange.Font.Bold = False
+                    textbox.TextFrame.TextRange.ParagraphFormat.Alignment = 2  # 居中对齐
+                    
+                    # 去除文本框内部边距，使文字尽可能贴近上方
+                    textbox.TextFrame.MarginTop = 0
+                    textbox.TextFrame.MarginBottom = 0
+                    
+                    # 去掉文本框边框
+                    textbox.Line.Visible = 0
+                    
+                    log(f"Added label text below video at Slide {slide_idx}")
+                except Exception as e:
+                    log(f"Warning: Could not add label text: {e}")
+                
             else:
                 log(f"Warning: No existing content found on Slide {slide_idx} to compare against.")
                 # Optional: Just insert new video centered? For now, skipping to avoid mess.
@@ -401,6 +437,42 @@ def generate_append_report(existing_ppt_path, video_dir, output_path, gap):
                 
                 log(f"Inserting new image for {key} to right side...")
                 slide.Shapes.AddPicture(img_path, False, True, final_b_left, final_b_top, final_b_width, final_b_height)
+                
+                # 在对比图片下方添加标注文本
+                try:
+                    # 计算文本框位置：紧贴实际内容下方
+                    # 左侧内容底部
+                    content_bottom_a = new_a_top + new_a_height
+                    # 右侧内容底部
+                    content_bottom_b = final_b_top + final_b_height
+                    
+                    # 取两个内容中较低的一个作为基准，并添加少量间距
+                    text_top = max(content_bottom_a, content_bottom_b) + 2
+                    
+                    text_left = container_left
+                    text_width = container_width
+                    text_height = 30  # 稍微增加高度
+                    
+                    # 添加文本框
+                    textbox = slide.Shapes.AddTextbox(1, text_left, text_top, text_width, text_height)
+                    textbox.TextFrame.TextRange.Text = "（左）方案一                                                                                （右）方案二"
+                    
+                    # 设置文本格式
+                    textbox.TextFrame.TextRange.Font.Size = 16
+                    textbox.TextFrame.TextRange.Font.Color.RGB = 0x000000  # 黑色
+                    textbox.TextFrame.TextRange.Font.Bold = False
+                    textbox.TextFrame.TextRange.ParagraphFormat.Alignment = 2  # 居中对齐
+                    
+                    # 去除文本框内部边距，使文字尽可能贴近上方
+                    textbox.TextFrame.MarginTop = 0
+                    textbox.TextFrame.MarginBottom = 0
+                    
+                    # 去掉文本框边框
+                    textbox.Line.Visible = 0
+                    
+                    log(f"Added label text below image at Slide {slide_idx}")
+                except Exception as e:
+                    log(f"Warning: Could not add label text: {e}")
             else:
                 log(f"Warning: No existing content found on Slide {slide_idx} for {key}. Skipping move.")
                 # If we don't find existing content, we might still want to insert the new one?
