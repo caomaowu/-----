@@ -63,7 +63,7 @@ class ReportApp:
             textvariable=self.mode_var,
             state="readonly",
             width=50,
-            values=["普通生成", "对比生成(左右分屏)"],
+            values=["普通生成", "对比生成(左右分屏)", "已有PPT+新视频对比"],
         )
         self.mode_combo.grid(row=3, column=1, padx=5, pady=5)
         self.mode_combo.bind("<<ComboboxSelected>>", self.on_mode_change)
@@ -71,6 +71,12 @@ class ReportApp:
         self.video_b_label = ttk.Label(config_frame, text="对比视频文件夹(B):")
         self.video_b_entry = ttk.Entry(config_frame, textvariable=self.video_dir_b_var, width=53)
         self.video_b_btn = ttk.Button(config_frame, text="浏览...", command=self.browse_video_dir_b)
+
+        # 4. Existing PPT for Append Mode
+        self.existing_ppt_label = ttk.Label(config_frame, text="已有 PPT (.pptx):")
+        self.existing_ppt_var = tk.StringVar()
+        self.existing_ppt_entry = ttk.Entry(config_frame, textvariable=self.existing_ppt_var, width=53)
+        self.existing_ppt_btn = ttk.Button(config_frame, text="浏览...", command=self.browse_existing_ppt)
 
         # Action Section
         action_frame = ttk.Frame(main_frame, padding="10")
@@ -132,8 +138,25 @@ class ReportApp:
         if directory:
             self.video_dir_b_var.set(directory)
 
+    def browse_existing_ppt(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("PowerPoint Files", "*.pptx")],
+            initialdir=os.getcwd()
+        )
+        if file_path:
+            self.existing_ppt_var.set(file_path)
+
     def on_mode_change(self, event=None):
         mode = self.mode_var.get()
+        
+        # Reset UI
+        self.video_b_label.grid_remove()
+        self.video_b_entry.grid_remove()
+        self.video_b_btn.grid_remove()
+        self.existing_ppt_label.grid_remove()
+        self.existing_ppt_entry.grid_remove()
+        self.existing_ppt_btn.grid_remove()
+
         if mode == "对比生成(左右分屏)":
             self.video_b_label.grid(row=4, column=0, sticky=tk.W)
             self.video_b_entry.grid(row=4, column=1, padx=5, pady=5)
@@ -142,11 +165,17 @@ class ReportApp:
             # Auto-select compare script
             if "generate_compare_report.py" in self.script_combo['values']:
                 self.script_combo.set("generate_compare_report.py")
-        else:
-            self.video_b_label.grid_remove()
-            self.video_b_entry.grid_remove()
-            self.video_b_btn.grid_remove()
+                
+        elif mode == "已有PPT+新视频对比":
+            self.existing_ppt_label.grid(row=4, column=0, sticky=tk.W)
+            self.existing_ppt_entry.grid(row=4, column=1, padx=5, pady=5)
+            self.existing_ppt_btn.grid(row=4, column=2, padx=5)
             
+            # Auto-select append script
+            if "generate_append_report.py" in self.script_combo['values']:
+                self.script_combo.set("generate_append_report.py")
+                
+        else: # Normal
             # Auto-select normal script
             if "generate_report.py" in self.script_combo['values']:
                 self.script_combo.set("generate_report.py")
@@ -157,12 +186,22 @@ class ReportApp:
         video_dir = self.video_dir_var.get()
         mode = self.mode_var.get()
         video_dir_b = self.video_dir_b_var.get()
+        existing_ppt = self.existing_ppt_var.get()
 
-        if not script or not template or not video_dir:
-            messagebox.showerror("错误", "请确保已选择脚本、模板和视频文件夹。")
+        if not script or not video_dir:
+             messagebox.showerror("错误", "请确保已选择脚本和视频文件夹。")
+             return
+             
+        if mode == "普通生成" and not template:
+             messagebox.showerror("错误", "普通生成需要选择 PPT 模板。")
+             return
+
+        if mode == "对比生成(左右分屏)" and (not video_dir_b or not template):
+            messagebox.showerror("错误", "对比生成需要选择 PPT 模板和对比视频文件夹(B)。")
             return
-        if mode == "对比生成(左右分屏)" and not video_dir_b:
-            messagebox.showerror("错误", "对比生成需要选择对比视频文件夹(B)。")
+            
+        if mode == "已有PPT+新视频对比" and not existing_ppt:
+            messagebox.showerror("错误", "请选择已有的 PPT 文件。")
             return
 
         self.run_btn.config(state='disabled')
@@ -171,11 +210,11 @@ class ReportApp:
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state='disabled')
         
-        thread = threading.Thread(target=self.run_subprocess, args=(script, template, video_dir, mode, video_dir_b))
+        thread = threading.Thread(target=self.run_subprocess, args=(script, template, video_dir, mode, video_dir_b, existing_ppt))
         thread.daemon = True
         thread.start()
 
-    def run_subprocess(self, script, template, video_dir, mode, video_dir_b):
+    def run_subprocess(self, script, template, video_dir, mode, video_dir_b, existing_ppt):
         try:
             # Generate output filename based on video directory and date
             # Format: {VideoFolderName}-模流分析报告-{YYYY.MM.DD}.pptx
@@ -184,22 +223,19 @@ class ReportApp:
             video_folder_name = os.path.basename(os.path.normpath(video_dir))
             current_date = datetime.datetime.now().strftime("%Y.%m.%d")
             
-            output_path = f"{video_folder_name}-模流分析报告-{current_date}.pptx"
-            
             # Absolute paths
             cwd = os.getcwd()
+            
             if mode == "对比生成(左右分屏)":
+                output_path = f"{video_folder_name}-模流分析报告-{current_date}.pptx"
                 compare_script = os.path.join(cwd, "generate_compare_report.py")
                 if not os.path.exists(compare_script):
                     raise FileNotFoundError("缺少对比脚本 generate_compare_report.py")
                 script_path = compare_script
-            else:
-                script_path = os.path.join(cwd, script)
-            template_path = os.path.join(cwd, template)
-            output_full_path = os.path.join(cwd, output_path)
-            
-            # Command
-            if mode == "对比生成(左右分屏)":
+                
+                template_path = os.path.join(cwd, template)
+                output_full_path = os.path.join(cwd, output_path)
+                
                 cmd = [
                     sys.executable,
                     script_path,
@@ -212,7 +248,35 @@ class ReportApp:
                     "--output_path",
                     output_full_path,
                 ]
-            else:
+            elif mode == "已有PPT+新视频对比":
+                # Output name logic for append mode
+                # Format: {VideoFolderName}-第二模-模流分析报告-{YYYY.MM.DD}.pptx
+                output_path = f"{video_folder_name}-第二模-模流分析报告-{current_date}.pptx"
+                
+                append_script = os.path.join(cwd, "generate_append_report.py")
+                if not os.path.exists(append_script):
+                    raise FileNotFoundError("缺少脚本 generate_append_report.py")
+                script_path = append_script
+                
+                output_full_path = os.path.join(cwd, output_path)
+                
+                cmd = [
+                    sys.executable,
+                    script_path,
+                    "--existing_ppt",
+                    existing_ppt,
+                    "--video_dir",
+                    video_dir,
+                    "--output_path",
+                    output_full_path,
+                ]
+                
+            else: # Normal
+                output_path = f"{video_folder_name}-模流分析报告-{current_date}.pptx"
+                script_path = os.path.join(cwd, script)
+                template_path = os.path.join(cwd, template)
+                output_full_path = os.path.join(cwd, output_path)
+                
                 cmd = [
                     sys.executable,
                     script_path,
