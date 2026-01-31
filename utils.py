@@ -132,3 +132,52 @@ def split_rect(left, top, width, height, gap):
     a = (left, top, half_width, height)
     b = (left + half_width + gap, top, half_width, height)
     return a, b
+
+import difflib
+
+def find_media_file(directory, key):
+    """
+    Finds a media file in the directory that matches the key.
+    Prioritizes exact matches of name (ignoring extension).
+    Fallbacks to fuzzy matching if exact match not found.
+    """
+    if not os.path.exists(directory):
+        return None
+        
+    # Common media extensions
+    extensions = ['.mp4', '.avi', '.mov', '.wmv', '.mkv', '.png', '.jpg', '.jpeg', '.bmp', '.gif']
+    
+    # 1. Exact Match Strategy
+    # search for key.ext
+    for ext in extensions:
+        path = os.path.join(directory, f"{key}{ext}")
+        if os.path.exists(path):
+            return path
+
+    # 2. Fuzzy Match Strategy
+    # Collect all valid media files in directory
+    candidates = []
+    try:
+        for f in os.listdir(directory):
+            name, ext = os.path.splitext(f)
+            if ext.lower() in extensions:
+                candidates.append(name)
+    except:
+        return None
+    
+    if not candidates:
+        return None
+
+    # Find closest match
+    # cutoff=0.6 means 60% similarity required
+    matches = difflib.get_close_matches(key, candidates, n=1, cutoff=0.6)
+    
+    if matches:
+        best_match_name = matches[0]
+        # Reconstruct path (we need to find the extension again)
+        for f in os.listdir(directory):
+            if f.startswith(best_match_name) and os.path.splitext(f)[0] == best_match_name:
+                 log(f"Fuzzy match: '{key}' -> '{f}'")
+                 return os.path.join(directory, f)
+            
+    return None

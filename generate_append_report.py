@@ -1,7 +1,7 @@
 import os
 import argparse
 import time
-from utils import log, extract_last_frame, load_config
+from utils import log, extract_last_frame, load_config, find_media_file
 from ppt_automation import PPTAutomation
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -10,8 +10,11 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 def generate_append_report(existing_ppt_path, video_dir, output_path, gap):
     log("Starting append report generation...")
     
+    # config = load_config(CONFIG_PATH)
+    # labels = config.get("labels", {}) # We can still use labels if needed, but passed to PPTAutomation init
+    
+    # To keep consistent with other scripts, let's load config for labels
     config = load_config(CONFIG_PATH)
-    video_mapping = config.get("video_mapping", {})
     labels = config.get("labels", {})
 
     if not os.path.exists(existing_ppt_path):
@@ -21,55 +24,81 @@ def generate_append_report(existing_ppt_path, video_dir, output_path, gap):
         log(f"Error: Video directory does not exist: {video_dir}")
         return 2
 
-    # 1. Prepare Images
-    log("Step 1: Extracting frames for new videos...")
-    temp_dir = BASE_DIR
-    temp_images = {}
-    
-    for key, info in video_mapping.items():
-        filename = info["file"]
-        video_path = os.path.join(video_dir, filename)
-        out_path = os.path.join(temp_dir, f"temp_{key}_new.png")
-        if os.path.exists(video_path) and extract_last_frame(video_path, out_path):
-            temp_images[key] = out_path
-
-    # 2. PPT Automation
+    # 1. PPT Automation
     ppt = PPTAutomation(existing_ppt_path, output_path, config_labels=labels)
     if not ppt.open():
         return 3
 
-    # 3. Process Slides (Based on Index)
-    log("Step 2: Processing slides...")
+    # 2. Scan and Process
+    log("Scanning slides for existing SmartTags...")
+    # New logic: Scan for SmartTags instead of placeholders
+    actions = ppt.scan_smart_tags()
+    log(f"Found {len(actions)} existing media objects (SmartTags).")
     
-    # Process Video Slides
-    for key, info in video_mapping.items():
-        slide_idx = info.get("slide")
-        filename = info.get("file")
+    temp_images = []
+    
+    for action in actions:
+        key = action["key"]
+        slide = action["slide"]
+        shape = action["shape"]
         
-        if not slide_idx or not filename: continue
+        # Find new media file to compare against
+        media_path = find_media_file(video_dir, key)
         
-        video_path = os.path.join(video_dir, filename)
-        if not os.path.exists(video_path):
-            log(f"Skipping {key}: New video not found.")
+        if not media_path:
+            log(f"Skipping {key}: New media not found in video dir")
             continue
             
-        ppt.insert_comparison_with_existing(slide_idx, video_path, gap, is_video=True)
-
-    # Process Image Slides
-    for key, info in video_mapping.items():
-        slide_idx = info.get("img_slide")
-        img_path = temp_images.get(key)
+        is_video_file = media_path.lower().endswith(('.mp4', '.avi', '.mov', '.wmv', '.mkv'))
+        final_path = media_path
         
-        if not slide_idx or not img_path: continue
+        # Check if we need to extract frame (if existing is image, maybe we want image vs image?)
+        # But append mode usually compares video vs new video.
+        # Let's assume if new file is video, we insert video.
+        # Unless we want to match types?
+        # Let's stick to: if new file is video, insert as video.
         
-        ppt.insert_comparison_with_existing(slide_idx, img_path, gap, is_video=False)
+        # However, we need to know if we should extract frame.
+        # Usually append report is "Existing vs New".
+        # If new is video, use video.
+        # If new is video but we want image?
+        # Let's assume default behavior: use the file as is.
+        # EXCEPT if the existing shape suggests it was an image?
+        # Hard to tell from just shape.
+        # Let's check if the filename suggests it should be an image (legacy logic checked 'img_slide').
+        # But now we don't have config.
+        # Let's rely on the file extension found.
+        
+        is_video_insert = True
+        
+        if is_video_file:
+            # But wait, maybe we want to extract frame if it's an image comparison?
+            # In v2.0, we don't know if the user wants image or video just by key.
+            # We can check if the key starts with IMG_? No, key is just 'wendu'.
+            # We can check the existing shape type?
+            # If existing shape is a picture, maybe we want a picture?
+            if shape.Type == 13: # msoPicture
+                 # It's a picture.
+                 # Should we convert new video to picture?
+                 # Let's try to be smart.
+                 # If we found a video file but existing is picture, let's extract frame.
+                 temp_img = os.path.join(BASE_DIR, f"temp_{key}_append_{int(time.time())}.png")
+                 if extract_last_frame(media_path, temp_img):
+                     final_path = temp_img
+                     temp_images.append(final_path)
+                     is_video_insert = False
+        else:
+            is_video_insert = False
+        
+        # Call new append logic
+        ppt.insert_comparison_with_smart_tag(slide, shape, final_path, gap, is_video=is_video_insert)
 
-    # 4. Save
-    log("Step 3: Saving report...")
+    # 3. Save
+    log("Saving report...")
     ppt.save_and_close()
     
-    # 5. Cleanup
-    for p in temp_images.values():
+    # 4. Cleanup
+    for p in temp_images:
         if os.path.exists(p):
             try: os.remove(p)
             except: pass

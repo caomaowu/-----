@@ -51,40 +51,92 @@ class PPTAutomation:
         except:
             pass
 
-    def scan_placeholders(self, valid_keys):
+    def _parse_tag(self, text):
         """
-        Scans all slides for shapes starting with VID_ or IMG_ that match valid keys.
-        Returns a list of dicts with action info.
+        Parses tag like VID_key_W600_H400_S1.0 (Case Insensitive)
+        Returns: key, directives dict
+        """
+        parts = text.strip().split('_')
+        # parts[0] is VID or IMG (handled in scan)
+        if len(parts) < 2: return None, {}
+        
+        # Keep key as is (preserve case just in case, though Windows is case insensitive)
+        key = parts[1] 
+        directives = {}
+        
+        # Parse directives case-insensitively
+        for p in parts[2:]:
+            p_upper = p.upper()
+            if p_upper.startswith('W'):
+                try: directives['W'] = float(p_upper[1:])
+                except: pass
+            elif p_upper.startswith('H'):
+                try: directives['H'] = float(p_upper[1:])
+                except: pass
+            elif p_upper.startswith('S'):
+                try: directives['S'] = float(p_upper[1:])
+                except: pass
+                
+        return key, directives
+
+    def scan_placeholders(self):
+        """
+        Scans all slides for shapes starting with VID_ or IMG_ (Case Insensitive).
+        Checks TextFrame first, then Name.
+        Returns a list of action dicts.
         """
         actions = []
         try:
             for i, slide in enumerate(self.pres.Slides):
-                # slide index is 1-based, enumerate is 0-based
+                # Iterate backwards to avoid issues if we were deleting (though we aren't here)
+                # But actually iterating normally is fine as we just collect info.
                 for shape in slide.Shapes:
-                    name = shape.Name
-                    if name.startswith("VID_"):
-                        key = name.replace("VID_", "")
-                        if key in valid_keys:
-                            actions.append({
-                                "slide": slide,
-                                "shape_name": name,
-                                "type": "video",
-                                "key": key
-                            })
-                    elif name.startswith("IMG_"):
-                        key = name.replace("IMG_", "")
-                        if key in valid_keys:
-                            actions.append({
-                                "slide": slide,
-                                "shape_name": name,
-                                "type": "image",
-                                "key": key
-                            })
+                    tag_text = ""
+                    # 1. Try Text Content
+                    if shape.HasTextFrame:
+                        try:
+                            text = shape.TextFrame.TextRange.Text.strip()
+                            text_upper = text.upper()
+                            if text_upper.startswith("VID_") or text_upper.startswith("IMG_"):
+                                tag_text = text
+                        except: pass
+                    
+                    # 2. Try Name if Text failed
+                    if not tag_text:
+                        name = shape.Name
+                        name_upper = name.upper()
+                        if name_upper.startswith("VID_") or name_upper.startswith("IMG_"):
+                            tag_text = name
+                    
+                    if tag_text:
+                        prefix_upper = tag_text.upper()
+                        prefix = "video" if prefix_upper.startswith("VID_") else "image"
+                        key, directives = self._parse_tag(tag_text)
+                        
+                        if not key: continue
+
+                        # Check if it's a container (user resized it)
+                        is_container = False
+                        if shape.Width > 50 and shape.Height > 50: # Threshold from plan
+                            is_container = True
+                        
+                        # If explicit W/H directives exist, they override container logic
+                        if 'W' in directives or 'H' in directives or 'S' in directives:
+                            is_container = False 
+                        
+                        actions.append({
+                            "slide": slide,
+                            "shape": shape, 
+                            "type": prefix,
+                            "key": key,
+                            "directives": directives,
+                            "is_container": is_container
+                        })
         except Exception as e:
             log(f"Error scanning slides: {e}")
         return actions
 
-    def _insert_media_object(self, slide, media_path, left, top, width, height, is_video=True):
+    def _insert_media_object(self, slide, media_path, left, top, width, height, is_video=True, key=None):
         """Helper to insert media (video or image) with best-effort fallbacks"""
         if is_video:
             try:
@@ -101,6 +153,14 @@ class PPTAutomation:
         shape.Top = top
         shape.Width = width
         shape.Height = height
+        
+        # Tagging for Object Traceability (Append Mode)
+        if key:
+            try:
+                shape.Name = f"SmartTag_{key}"
+            except:
+                pass
+                
         return shape
 
     def _add_comparison_label(self, slide, container_rect):
@@ -128,42 +188,100 @@ class PPTAutomation:
         except Exception as e:
             log(f"Warning: Could not add label text: {e}")
 
-    def insert_video_by_name(self, slide, shape_name, media_path, is_video=True):
+    def process_media_placeholder(self, action, media_path):
         """
-        Replaces a named shape with a video or image, centering it.
+        Replaces a placeholder with media using Smart Sizing logic.
         """
         try:
-            shape = slide.Shapes(shape_name)
-            rect = (shape.Left, shape.Top, shape.Width, shape.Height)
+            slide = action["slide"]
+            shape = action["shape"]
+            directives = action["directives"]
+            is_container = action["is_container"]
+            is_video = (action["type"] == "video")
+            
+            # Get original shape rect
+            orig_left = shape.Left
+            orig_top = shape.Top
+            orig_width = shape.Width
+            orig_height = shape.Height
+            
+            # Delete the placeholder shape
             shape.Delete()
             
-            if os.path.exists(media_path):
-                size = get_media_size(media_path)
-                if size:
-                    rect = calculate_centered_rect(rect, size)
-                
-                left, top, width, height = rect
-                log(f"Inserting {'video' if is_video else 'image'} {media_path} at Slide {slide.SlideIndex}")
-                self._insert_media_object(slide, media_path, left, top, width, height, is_video)
-            else:
-                log(f"Warning: Media file missing: {media_path}")
-                
-        except Exception as e:
-            log(f"Error in insert_video_by_name for {shape_name}: {e}")
+            if not os.path.exists(media_path):
+                log(f"Media not found: {media_path}")
+                return
 
-    def insert_comparison(self, slide, shape_name, media_path_a, media_path_b, gap, is_video=True):
+            # Determine Target Rect
+            media_size = get_media_size(media_path)
+            if not media_size: media_size = (100, 100) # Fallback
+            
+            mw, mh = media_size
+            
+            target_left, target_top, target_width, target_height = orig_left, orig_top, orig_width, orig_height
+            
+            if is_container:
+                # Auto-Fit into container
+                target_left, target_top, target_width, target_height = calculate_centered_rect(
+                    (orig_left, orig_top, orig_width, orig_height), media_size
+                )
+            else:
+                # Anchor Mode / Directive Mode
+                if 'W' in directives:
+                    target_width = directives['W']
+                    target_height = target_width * (mh / mw)
+                elif 'H' in directives:
+                    target_height = directives['H']
+                    target_width = target_height * (mw / mh)
+                elif 'S' in directives:
+                    scale = directives['S']
+                    target_width = mw * scale
+                    target_height = mh * scale
+                else:
+                    # Default Anchor Mode: Expand from center
+                    # Use 80% of slide width as default target width
+                    slide_w = self.pres.PageSetup.SlideWidth
+                    target_width = slide_w * 0.8
+                    target_height = target_width * (mh / mw)
+                    
+                # Recenter based on original center
+                orig_center_x = orig_left + orig_width / 2
+                orig_center_y = orig_top + orig_height / 2
+                
+                target_left = orig_center_x - target_width / 2
+                target_top = orig_center_y - target_height / 2
+
+            # Insert
+            log(f"Inserting {os.path.basename(media_path)} at Slide {slide.SlideIndex}")
+            key = action.get("key")
+            self._insert_media_object(slide, media_path, target_left, target_top, target_width, target_height, is_video, key=key)
+            
+        except Exception as e:
+            log(f"Error processing placeholder {action.get('key')}: {e}")
+
+    def insert_comparison(self, slide, shape, media_path_a, media_path_b, gap, is_video=True):
         """
         Replaces a named shape with two media files side-by-side.
         """
         try:
-            shape = slide.Shapes(shape_name)
+            # shape passed in is the placeholder object
             rect = (shape.Left, shape.Top, shape.Width, shape.Height)
+            # Try to get key from shape name/text if possible to tag the new ones?
+            # Actually insert_comparison is called by generate_compare_report which scans placeholders.
+            # But the 'shape' object here is the placeholder which is about to be deleted.
+            # We don't easily have the key passed into this function directly in arguments,
+            # but we can infer it or update signature.
+            # For now, let's just update the signature to accept key if we want to tag comparison results too?
+            # Comparison results usually don't need to be appended again, but it's good practice.
+            # However, comparison splits into A and B. How to tag? SmartTag_key_A?
+            # Let's keep it simple for now and only focus on single report tagging for append.
+            
             shape.Delete()
             
             rect_a_container, rect_b_container = split_rect(rect[0], rect[1], rect[2], rect[3], gap)
             
             # Process A
-            if os.path.exists(media_path_a):
+            if media_path_a and os.path.exists(media_path_a):
                 size_a = get_media_size(media_path_a)
                 final_rect_a = calculate_centered_rect(rect_a_container, size_a) if size_a else rect_a_container
                 self._insert_media_object(slide, media_path_a, *final_rect_a, is_video)
@@ -171,23 +289,37 @@ class PPTAutomation:
                 log(f"Warning: Missing A media: {media_path_a}")
 
             # Process B
-            if os.path.exists(media_path_b):
+            if media_path_b and os.path.exists(media_path_b):
                 size_b = get_media_size(media_path_b)
                 final_rect_b = calculate_centered_rect(rect_b_container, size_b) if size_b else rect_b_container
                 self._insert_media_object(slide, media_path_b, *final_rect_b, is_video)
             else:
                 log(f"Warning: Missing B media: {media_path_b}")
 
-            # Add Label
-            # Note: The original code calculated text pos based on actual content bottom.
-            # Here we simplify to use the container bottom for stability, or we can improve if needed.
-            # But the original code logic was a bit complex with "max(content_bottom_a, content_bottom_b)".
-            # Let's try to stick to the container bottom or just use the passed rect.
-            # Using the original shape rect for label positioning is safer.
             self._add_comparison_label(slide, rect)
             
         except Exception as e:
-            log(f"Error in insert_comparison for {shape_name}: {e}")
+            log(f"Error in insert_comparison: {e}")
+
+    def scan_smart_tags(self):
+        """
+        Scans for existing shapes with name 'SmartTag_{key}'.
+        Returns list of dicts: {slide, shape, key}
+        """
+        found = []
+        try:
+            for slide in self.pres.Slides:
+                for shape in slide.Shapes:
+                    if shape.Name.startswith("SmartTag_"):
+                        key = shape.Name.replace("SmartTag_", "")
+                        found.append({
+                            "slide": slide,
+                            "shape": shape,
+                            "key": key
+                        })
+        except Exception as e:
+            log(f"Error scanning smart tags: {e}")
+        return found
 
     # --- Methods for Append Report (Slide Index Based) ---
     
@@ -236,73 +368,45 @@ class PPTAutomation:
             
         return (left, top, width, height)
 
-    def insert_comparison_with_existing(self, slide_index, new_media_path, gap, is_video=True):
+    def insert_comparison_with_smart_tag(self, slide, existing_shape, new_media_path, gap, is_video=True):
         """
-        Locates existing content on slide, resizes it to left, and inserts new media to right.
+        Locates existing content (identified by SmartTag), resizes it to left, and inserts new media to right.
         """
         try:
-            if slide_index > self.pres.Slides.Count:
-                log(f"Warning: Slide {slide_index} out of range.")
-                return
-
-            slide = self.pres.Slides(slide_index)
-            existing_shape = self._find_largest_media(slide)
+            log(f"Found existing content on Slide {slide.SlideIndex} (SmartTag)")
             
-            if existing_shape:
-                log(f"Found existing content on Slide {slide_index}")
-                
-                # Unlock aspect ratio if possible
-                try: existing_shape.LockAspectRatio = 0
-                except: pass
+            # Unlock aspect ratio if possible
+            try: existing_shape.LockAspectRatio = 0
+            except: pass
 
-                # Get maximized container
-                container_rect = self._get_content_area(slide)
-                rect_a_container, rect_b_container = split_rect(*container_rect, gap)
-                
-                # Fit existing shape into A (Left)
-                existing_w = existing_shape.Width
-                existing_h = existing_shape.Height
-                final_rect_a = calculate_centered_rect(rect_a_container, (existing_w, existing_h), bias_top=True)
-                
-                existing_shape.Left = final_rect_a[0]
-                existing_shape.Top = final_rect_a[1]
-                existing_shape.Width = final_rect_a[2]
-                existing_shape.Height = final_rect_a[3]
-                
-                # Insert New Media into B (Right)
-                if os.path.exists(new_media_path):
-                    size_b = get_media_size(new_media_path)
-                    final_rect_b = calculate_centered_rect(rect_b_container, size_b, bias_top=True) if size_b else rect_b_container
-                    self._insert_media_object(slide, new_media_path, *final_rect_b, is_video)
-                
-                # Add label (using container_rect for positioning)
-                # The original code used calculated content bottoms. 
-                # Here we use the bottom of the content area for simplicity, or we can try to be smart.
-                # Let's use the bottom of the container_rect which is where the content ends?
-                # Actually, calculate_centered_rect with bias_top puts content near top.
-                # So the text should be below the content.
-                # Let's approximate: use the max bottom of A and B.
-                bottom_a = final_rect_a[1] + final_rect_a[3]
-                # For B, we need to know where we put it.
-                # If we computed final_rect_b, we know.
-                # If new media missing, use container bottom?
-                
-                # Let's just use the logic from before:
-                # But here we don't have easy access to final_rect_b if we didn't calculate it (e.g. inside insert).
-                # Wait, I calculated final_rect_b above.
-                if os.path.exists(new_media_path):
-                     bottom_b = final_rect_b[1] + final_rect_b[3]
-                else:
-                     bottom_b = bottom_a
-                
-                text_top = max(bottom_a, bottom_b) + 2
-                
-                # Label
-                self._add_comparison_label(slide, (container_rect[0], text_top, container_rect[2], 30))
-                
-            else:
-                log(f"Warning: No existing content found on Slide {slide_index}.")
+            # Get maximized container
+            container_rect = self._get_content_area(slide)
+            rect_a_container, rect_b_container = split_rect(*container_rect, gap)
+            
+            # Fit existing shape into A (Left)
+            existing_w = existing_shape.Width
+            existing_h = existing_shape.Height
+            final_rect_a = calculate_centered_rect(rect_a_container, (existing_w, existing_h), bias_top=True)
+            
+            existing_shape.Left = final_rect_a[0]
+            existing_shape.Top = final_rect_a[1]
+            existing_shape.Width = final_rect_a[2]
+            existing_shape.Height = final_rect_a[3]
+            
+            # Insert New Media into B (Right)
+            bottom_b = final_rect_a[1] + final_rect_a[3] # Default
+            
+            if os.path.exists(new_media_path):
+                size_b = get_media_size(new_media_path)
+                final_rect_b = calculate_centered_rect(rect_b_container, size_b, bias_top=True) if size_b else rect_b_container
+                self._insert_media_object(slide, new_media_path, *final_rect_b, is_video)
+                bottom_b = final_rect_b[1] + final_rect_b[3]
+            
+            bottom_a = final_rect_a[1] + final_rect_a[3]
+            text_top = max(bottom_a, bottom_b) + 2
+            
+            # Label
+            self._add_comparison_label(slide, (container_rect[0], text_top, container_rect[2], 30))
                 
         except Exception as e:
-            log(f"Error in insert_comparison_with_existing on Slide {slide_index}: {e}")
-
+            log(f"Error in insert_comparison_with_smart_tag on Slide {slide.SlideIndex}: {e}")

@@ -1,7 +1,7 @@
 import os
 import argparse
 import time
-from utils import log, extract_last_frame, load_config
+from utils import log, extract_last_frame, load_config, find_media_file
 from ppt_automation import PPTAutomation
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -11,68 +11,65 @@ def generate_compare_report(video_dir_a, video_dir_b, template_path, output_path
     log("Starting compare report generation...")
     
     config = load_config(CONFIG_PATH)
-    video_mapping = config.get("video_mapping", {})
     labels = config.get("labels", {})
 
     if not os.path.exists(video_dir_a) or not os.path.exists(video_dir_b):
         log("Error: One of the video directories does not exist.")
         return 2
 
-    # 1. Prepare Images
-    log("Step 1: Extracting frames...")
-    temp_dir = BASE_DIR
-    temp_images_a = {}
-    temp_images_b = {}
-    
-    for key, info in video_mapping.items():
-        filename = info["file"] if isinstance(info, dict) else info
-        
-        # A
-        video_a = os.path.join(video_dir_a, filename)
-        out_a = os.path.join(temp_dir, f"temp_{key}_a.png")
-        if os.path.exists(video_a) and extract_last_frame(video_a, out_a):
-            temp_images_a[key] = out_a
-            
-        # B
-        video_b = os.path.join(video_dir_b, filename)
-        out_b = os.path.join(temp_dir, f"temp_{key}_b.png")
-        if os.path.exists(video_b) and extract_last_frame(video_b, out_b):
-            temp_images_b[key] = out_b
-
-    # 2. PPT Automation
+    # 1. PPT Automation
     ppt = PPTAutomation(template_path, output_path, config_labels=labels)
     if not ppt.open():
         return 3
 
-    # 3. Scan and Process
-    log("Step 2: Processing slides...")
-    actions = ppt.scan_placeholders(video_mapping.keys())
+    # 2. Scan and Process
+    log("Scanning slides for placeholders...")
+    actions = ppt.scan_placeholders()
     log(f"Found {len(actions)} anchors to process.")
+    
+    temp_images = []
     
     for action in actions:
         key = action["key"]
         slide = action["slide"]
-        shape_name = action["shape_name"]
-        is_video = (action["type"] == "video")
+        shape = action["shape"]
+        is_video_placeholder = (action["type"] == "video")
         
-        info = video_mapping[key]
-        filename = info["file"] if isinstance(info, dict) else info
+        # Find media files
+        path_a = find_media_file(video_dir_a, key)
+        path_b = find_media_file(video_dir_b, key)
         
-        if is_video:
-            media_path_a = os.path.join(video_dir_a, filename)
-            media_path_b = os.path.join(video_dir_b, filename)
-        else:
-            media_path_a = temp_images_a.get(key)
-            media_path_b = temp_images_b.get(key)
+        final_a = path_a
+        final_b = path_b
+        
+        # Handle Image Placeholders (Extract frames if video found)
+        if not is_video_placeholder:
+            # Process A
+            if path_a and path_a.lower().endswith(('.mp4', '.avi', '.mov', '.wmv', '.mkv')):
+                temp_a = os.path.join(BASE_DIR, f"temp_{key}_a_{int(time.time())}.png")
+                if extract_last_frame(path_a, temp_a):
+                    final_a = temp_a
+                    temp_images.append(temp_a)
+                else:
+                    final_a = None # Failed to extract
             
-        ppt.insert_comparison(slide, shape_name, media_path_a, media_path_b, gap, is_video=is_video)
+            # Process B
+            if path_b and path_b.lower().endswith(('.mp4', '.avi', '.mov', '.wmv', '.mkv')):
+                temp_b = os.path.join(BASE_DIR, f"temp_{key}_b_{int(time.time())}.png")
+                if extract_last_frame(path_b, temp_b):
+                    final_b = temp_b
+                    temp_images.append(temp_b)
+                else:
+                    final_b = None
+            
+        ppt.insert_comparison(slide, shape, final_a, final_b, gap, is_video=is_video_placeholder)
 
-    # 4. Save
-    log("Step 3: Saving report...")
+    # 3. Save
+    log("Saving report...")
     ppt.save_and_close()
     
-    # 5. Cleanup
-    for p in list(temp_images_a.values()) + list(temp_images_b.values()):
+    # 4. Cleanup
+    for p in temp_images:
         if p and os.path.exists(p):
             try: os.remove(p)
             except: pass

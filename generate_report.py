@@ -1,7 +1,7 @@
 import os
 import argparse
 import time
-from utils import log, extract_last_frame, load_config
+from utils import log, extract_last_frame, load_config, find_media_file
 from ppt_automation import PPTAutomation
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -11,65 +11,56 @@ def generate_report(video_dir, template_path, output_path):
     log("Starting report generation...")
     log(f"Video Directory: {video_dir}")
     
-    config = load_config(CONFIG_PATH)
-    video_mapping = config.get("video_mapping", {})
+    # config = load_config(CONFIG_PATH) # No longer needed for video_mapping
     
     if not os.path.exists(video_dir):
         log(f"Error: Video directory does not exist: {video_dir}")
         return
 
-    # 1. Prepare Images
-    log("Step 1: Extracting frames...")
-    temp_dir = BASE_DIR
-    temp_images = {}
-    
-    for key, info in video_mapping.items():
-        # Handle both simple filename (legacy config style if any) and dict style
-        filename = info["file"] if isinstance(info, dict) else info
-        video_path = os.path.join(video_dir, filename)
-        image_path = os.path.join(temp_dir, f"temp_{key}.png")
-        
-        if os.path.exists(video_path):
-            if extract_last_frame(video_path, image_path):
-                temp_images[key] = image_path
-        else:
-            log(f"Warning: Video file {filename} missing in {video_dir}.")
-
-    # 2. PPT Automation
+    # 1. PPT Automation
     ppt = PPTAutomation(template_path, output_path)
     if not ppt.open():
         return
 
-    # 3. Scan and Process
-    log("Step 2: Processing slides...")
-    actions = ppt.scan_placeholders(video_mapping.keys())
+    # 2. Scan and Process
+    log("Scanning slides for placeholders...")
+    actions = ppt.scan_placeholders()
     log(f"Found {len(actions)} anchors to process.")
+    
+    temp_images = []
     
     for action in actions:
         key = action["key"]
-        slide = action["slide"]
-        shape_name = action["shape_name"]
-        is_video = (action["type"] == "video")
+        is_video_placeholder = (action["type"] == "video")
         
-        info = video_mapping[key]
-        filename = info["file"] if isinstance(info, dict) else info
+        # Find media file
+        media_path = find_media_file(video_dir, key)
         
-        if is_video:
-            media_path = os.path.join(video_dir, filename)
-        else:
-            media_path = temp_images.get(key)
-            
-        if media_path:
-            ppt.insert_video_by_name(slide, shape_name, media_path, is_video=is_video)
-        else:
+        if not media_path:
             log(f"Skipping {key}: Media not found")
+            continue
+            
+        is_video_file = media_path.lower().endswith(('.mp4', '.avi', '.mov', '.wmv', '.mkv'))
+        final_path = media_path
+        
+        # Handle Image Placeholder needing Video Frame
+        if not is_video_placeholder and is_video_file:
+            temp_img = os.path.join(BASE_DIR, f"temp_{key}_{int(time.time())}.png")
+            if extract_last_frame(media_path, temp_img):
+                final_path = temp_img
+                temp_images.append(final_path)
+            else:
+                log(f"Warning: Failed to extract frame for {key} from {media_path}")
+                continue
+                
+        ppt.process_media_placeholder(action, final_path)
 
-    # 4. Save
-    log("Step 3: Saving report...")
+    # 3. Save
+    log("Saving report...")
     ppt.save_and_close()
     
-    # 5. Cleanup
-    for img_path in temp_images.values():
+    # 4. Cleanup
+    for img_path in temp_images:
         if os.path.exists(img_path):
             try: os.remove(img_path)
             except: pass
