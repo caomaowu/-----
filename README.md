@@ -11,6 +11,7 @@
 - **智能尺寸**: 支持容器自适应（Auto-Fit）和指令控制（Smart Sizing）
 - **锚点定位**: 使用锚点形状精确定位，支持大小写不敏感
 - **对比报告**: 支持生成对比报告
+- **自动读数**: 支持从生成的曲线图中自动OCR识别末端数值，并回填到PPT
 
 ## 项目结构
 
@@ -37,14 +38,19 @@
 - `pywin32` (win32com)
 - `numpy`
 - `tkinter` (Python内置)
+- `pytesseract` (OCR支持)
+- `Pillow` (图像处理)
 
 ## 安装步骤
 
 1. 克隆或下载项目到本地
 2. 安装依赖库：
 ```bash
-pip install opencv-python pywin32 numpy
+pip install opencv-python pywin32 numpy pytesseract Pillow
 ```
+3. **安装 Tesseract-OCR 引擎**:
+   - 本项目内置了 `third_party/tesseract`，通常无需单独安装。
+   - 如果遇到 OCR 错误，请确保系统已安装 [Tesseract-OCR](https://github.com/UB-Mannheim/tesseract/wiki) 并配置环境变量。
 
 ## 使用方法
 
@@ -107,6 +113,36 @@ python generate_compare_report.py --template 自动化模板.pptx --video_dir �
   - `_H[数值]`: 锁定高度 (例如 `VID_wendu_H400`)
   - `_S[数值]`: 按原始分辨率缩放 (例如 `VID_wendu_S1.0` 表示原图尺寸)
 
+## 曲线图自动读数 (OCR)
+**(v2.3 新增功能)**
+
+系统可以自动识别生成的曲线图，读取曲线末端的数值，并自动填入 PPT。
+
+### 1. 原理
+1. **导出**: 系统将生成的 `SmartTag_<key>` 对象导出为临时图片。
+2. **定位**: 自动识别图片中的 Y 轴刻度线和曲线末端位置。
+3. **计算**: 根据 Y 轴刻度范围和曲线末端的高度，线性插值计算出数值。
+4. **替换**: 寻找 PPT 中名为 `VAL_<key>` 的文本占位符，替换为计算出的数值。
+
+### 2. 使用方法
+- **视频/图片锚点**: 命名为 `VID_<key>` 或 `IMG_<key>` (例如 `IMG_mass`)。
+- **数值文本框**: 在 PPT 中新建一个文本框，内容写为 `VAL_<key>` (例如 `VAL_mass`)。
+- **运行**: 生成报告后，程序会自动识别 `IMG_mass` 的内容，并将结果填入 `VAL_mass`。
+
+### 3. 诊断工具
+如果发现识别结果不准，可以使用内置的图形化诊断工具进行调试：
+
+```bash
+python diagnose_image.py [图片路径]
+```
+- **黄色框**: 裁剪区域
+- **青色框**: Y 轴搜索区域
+- **绿色框**: 识别到的有效刻度
+- **红色框**: 被剔除的干扰刻度
+- **洋红色点**: 曲线末端位置
+
+可通过界面动态调整裁剪比例和判定阈值，找到最佳参数。
+
 ## 追加对比模式 (Append Mode)
 **(v2.1 新增：对象溯源)**
 
@@ -148,6 +184,10 @@ python generate_compare_report.py --template 自动化模板.pptx --video_dir �
 
 ## 更新日志
 
+- v2.3.0:
+  - **自动OCR读数**: 新增曲线图数值识别功能，支持自动填充 `VAL_` 开头的文本占位符。
+  - **诊断工具**: 提供 `diagnose_image.py` 可视化调试工具，支持动态调整识别参数。
+  - **智能抗干扰**: 采用聚类算法自动剔除 X 轴刻度和背景噪声干扰。
 - v2.2.0:
   - **模糊匹配**: 增强文件查找逻辑，支持文件名容错（如拼写错误或轻微差异），优先精确匹配。
 - v2.1.0:

@@ -106,3 +106,5 @@ ipython_config.py
 *.avi
 *.mov
 *.wmv
+
+third_party/

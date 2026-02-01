@@ -1,7 +1,7 @@
 import os
 import argparse
 import time
-from utils import log, extract_last_frame, load_config, find_media_file
+from utils import log, extract_last_frame, load_config, find_media_file, detect_curve_end_value
 from ppt_automation import PPTAutomation
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +28,7 @@ def generate_report(video_dir, template_path, output_path):
     log(f"Found {len(actions)} anchors to process.")
     
     temp_images = []
+    processed_keys = set()
     
     for action in actions:
         key = action["key"]
@@ -54,6 +55,42 @@ def generate_report(video_dir, template_path, output_path):
                 continue
                 
         ppt.process_media_placeholder(action, final_path)
+        processed_keys.add(key)
+
+    # Curve Recognition Phase
+    log("Starting curve value recognition...")
+    temp_export_dir = os.path.join(BASE_DIR, "temp_exports")
+    if not os.path.exists(temp_export_dir):
+        os.makedirs(temp_export_dir)
+        
+    for key in processed_keys:
+        export_path = os.path.join(temp_export_dir, f"{key}.png")
+        if ppt.export_smarttag_image(key, export_path):
+            value = detect_curve_end_value(export_path)
+            
+            # Debug: Save debug image if recognition failed or just for trace
+            # (Optional: can be enabled by a flag, but for now let's keep clean)
+            
+            if value is not None:
+                val_str = f"{value:.3e}"
+                log(f"Detected value for {key}: {val_str}")
+                ppt.replace_text_placeholder(key, val_str)
+            else:
+                log(f"Could not detect value for {key}")
+                # Save failed image for inspection
+                try:
+                    failed_debug_path = os.path.join(BASE_DIR, f"debug_failed_{key}.png")
+                    import shutil
+                    shutil.copy(export_path, failed_debug_path)
+                    log(f"Saved failed image to {failed_debug_path}")
+                except: pass
+            
+            if os.path.exists(export_path):
+                try: os.remove(export_path)
+                except: pass
+                
+    try: os.rmdir(temp_export_dir)
+    except: pass
 
     # 3. Save
     log("Saving report...")

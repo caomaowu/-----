@@ -410,3 +410,43 @@ class PPTAutomation:
                 
         except Exception as e:
             log(f"Error in insert_comparison_with_smart_tag on Slide {slide.SlideIndex}: {e}")
+
+    def export_smarttag_image(self, key, output_path):
+        """
+        Exports the shape named 'SmartTag_{key}' to the output path.
+        """
+        try:
+            target_name = f"SmartTag_{key}"
+            for slide in self.pres.Slides:
+                for shape in slide.Shapes:
+                    if shape.Name == target_name:
+                        # 2 = ppShapeFormatPNG
+                        shape.Export(output_path, 2)
+                        return True
+            log(f"SmartTag_{key} not found for export.")
+            return False
+        except Exception as e:
+            log(f"Error exporting SmartTag_{key}: {e}")
+            return False
+
+    def replace_text_placeholder(self, key, value_str):
+        """
+        Replaces 'VAL_{key}' with value_str in all slides.
+        """
+        target_text = f"VAL_{key}"
+        count = 0
+        try:
+            for slide in self.pres.Slides:
+                for shape in slide.Shapes:
+                    if shape.HasTextFrame:
+                        try:
+                            text_range = shape.TextFrame.TextRange
+                            if target_text in text_range.Text:
+                                text_range.Replace(FindWhat=target_text, ReplaceWhat=value_str)
+                                count += 1
+                        except:
+                            pass
+            if count > 0:
+                log(f"Replaced {count} occurrences of {target_text}")
+        except Exception as e:
+            log(f"Error replacing text {target_text}: {e}")
