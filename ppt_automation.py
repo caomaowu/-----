@@ -97,9 +97,6 @@ class PPTAutomation:
                         try:
                             text = shape.TextFrame.TextRange.Text.strip()
                             text_upper = text.upper()
-                            
-                            # Note: CURVE tags are now handled in a separate pass (scan_curve_tags)
-                            
                             if text_upper.startswith("VID_") or text_upper.startswith("IMG_"):
                                 tag_text = text
                         except: pass
@@ -137,36 +134,6 @@ class PPTAutomation:
                         })
         except Exception as e:
             log(f"Error scanning slides: {e}")
-        return actions
-
-    def scan_curve_tags(self):
-        """
-        Scans all slides specifically for {{CURVE:...}} tags.
-        This should be called AFTER media insertion.
-        """
-        actions = []
-        try:
-            for i, slide in enumerate(self.pres.Slides):
-                for shape in slide.Shapes:
-                    if shape.HasTextFrame:
-                        try:
-                            text = shape.TextFrame.TextRange.Text.strip()
-                            # Check for Curve Placeholder
-                            curve_match = re.search(r'\{\{CURVE:([^}|]+)(?:\|([^}]+))?\}\}', text)
-                            if curve_match:
-                                key = curve_match.group(1).strip()
-                                options = curve_match.group(2).strip() if curve_match.group(2) else ""
-                                actions.append({
-                                    "slide": slide,
-                                    "shape": shape,
-                                    "type": "curve",
-                                    "key": key,
-                                    "options": options,
-                                    "original_text": text
-                                })
-                        except: pass
-        except Exception as e:
-            log(f"Error scanning curve tags: {e}")
         return actions
 
     def _insert_media_object(self, slide, media_path, left, top, width, height, is_video=True, key=None):
@@ -220,25 +187,6 @@ class PPTAutomation:
             textbox.Line.Visible = 0
         except Exception as e:
             log(f"Warning: Could not add label text: {e}")
-
-    def export_slide_as_image(self, slide, output_path):
-        """Exports a single slide as an image."""
-        try:
-            # Export(FileName, FilterName, ScaleWidth, ScaleHeight)
-            # FilterName is usually inferred from extension, but "PNG" is safe.
-            # 0, 0 means default size
-            slide.Export(output_path, "PNG", 0, 0)
-            return True
-        except Exception as e:
-            log(f"Error exporting slide {slide.SlideIndex}: {e}")
-            return False
-
-    def replace_text(self, shape, new_text):
-        """Replaces text in a shape"""
-        try:
-            shape.TextFrame.TextRange.Text = new_text
-        except Exception as e:
-            log(f"Error replacing text: {e}")
 
     def process_media_placeholder(self, action, media_path):
         """
@@ -448,20 +396,6 @@ class PPTAutomation:
             # Insert New Media into B (Right)
             bottom_b = final_rect_a[1] + final_rect_a[3] # Default
             
-            if os.path.exists(new_media_path):
-                size_b = get_media_size(new_media_path)
-                final_rect_b = calculate_centered_rect(rect_b_container, size_b, bias_top=True) if size_b else rect_b_container
-                self._insert_media_object(slide, new_media_path, *final_rect_b, is_video)
-                bottom_b = final_rect_b[1] + final_rect_b[3]
-            
-            bottom_a = final_rect_a[1] + final_rect_a[3]
-            text_top = max(bottom_a, bottom_b) + 2
-            
-            # Label
-            self._add_comparison_label(slide, (container_rect[0], text_top, container_rect[2], 30))
-                
-        except Exception as e:
-            log(f"Error in insert_comparison_with_smart_tag on Slide {slide.SlideIndex}: {e}")
             if os.path.exists(new_media_path):
                 size_b = get_media_size(new_media_path)
                 final_rect_b = calculate_centered_rect(rect_b_container, size_b, bias_top=True) if size_b else rect_b_container

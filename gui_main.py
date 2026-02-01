@@ -296,7 +296,7 @@ class ReportApp:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                encoding='gbk', # Use gbk for Windows console
+                encoding='utf-8', # Try utf-8 first
                 errors='replace',
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
