@@ -4,6 +4,7 @@ import time
 import json
 from utils import log, extract_last_frame, load_config, find_media_file, detect_curve_end_value
 from ppt_automation import PPTAutomation
+from ai_analysis import AIAnalyzer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -31,6 +32,7 @@ def generate_report(video_dir, template_path, output_path):
     log(f"Video Directory: {video_dir}")
     
     # config = load_config(CONFIG_PATH) # No longer needed for video_mapping
+    main_config = load_config(CONFIG_PATH)
     
     if not os.path.exists(video_dir):
         log(f"Error: Video directory does not exist: {video_dir}")
@@ -62,6 +64,7 @@ def generate_report(video_dir, template_path, output_path):
     
     temp_images = []
     processed_keys = set()
+    key_to_image_path = {} # Map key to local image path for AI analysis
     
     for action in actions:
         key = action["key"]
@@ -77,15 +80,27 @@ def generate_report(video_dir, template_path, output_path):
         is_video_file = media_path.lower().endswith(('.mp4', '.avi', '.mov', '.wmv', '.mkv'))
         final_path = media_path
         
-        # Handle Image Placeholder needing Video Frame
-        if not is_video_placeholder and is_video_file:
+        # Logic update: We always want a static image for AI analysis if it's a video file.
+        # So we extract frame for ALL video files found, not just when placeholder is Image.
+        if is_video_file:
             temp_img = os.path.join(BASE_DIR, f"temp_{key}_{int(time.time())}.png")
+            # Only extract if we haven't already (though keys should be unique usually)
             if extract_last_frame(media_path, temp_img):
-                final_path = temp_img
-                temp_images.append(final_path)
+                temp_images.append(temp_img)
+                key_to_image_path[key] = temp_img
+                
+                # If placeholder is image type, we MUST use this frame as final_path
+                if not is_video_placeholder:
+                    final_path = temp_img
             else:
                 log(f"Warning: Failed to extract frame for {key} from {media_path}")
-                continue
+                # If we failed to extract and it's an image placeholder, we might have issues.
+                # But let's continue with original file if it's video placeholder.
+                if not is_video_placeholder:
+                    continue
+        else:
+            # It's an image file
+            key_to_image_path[key] = media_path
                 
         ppt.process_media_placeholder(action, final_path)
         processed_keys.add(key)
@@ -147,6 +162,10 @@ def generate_report(video_dir, template_path, output_path):
                 
     try: os.rmdir(temp_export_dir)
     except: pass
+
+    # AI Analysis Phase
+    ai_analyzer = AIAnalyzer(main_config)
+    ai_analyzer.process_presentation(ppt, temp_export_dir, local_images_map=key_to_image_path)
 
     # 3. Save
     log("Saving report...")

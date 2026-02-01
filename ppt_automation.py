@@ -512,3 +512,48 @@ class PPTAutomation:
                 
         except Exception as e:
             log(f"Error in replace_texts: {e}")
+
+    def scan_ai_triggers(self):
+        """
+        Scans all slides for text frames containing 'AI_{key}'.
+        Returns list of dicts: {slide, shape, key, full_match_str}
+        """
+        triggers = []
+        import re
+        # Pattern to match AI_ followed by word characters (letters, numbers, underscore, chinese)
+        # We capture the key.
+        pattern = re.compile(r"(AI_([a-zA-Z0-9_\u4e00-\u9fa5]+))")
+        
+        try:
+            for slide in self.pres.Slides:
+                for shape in slide.Shapes:
+                    if shape.HasTextFrame:
+                        try:
+                            text = shape.TextFrame.TextRange.Text
+                            if "AI_" in text:
+                                matches = pattern.findall(text)
+                                # matches is list of tuples: [('AI_key', 'key'), ...]
+                                for full_match, key in matches:
+                                    triggers.append({
+                                        "slide": slide,
+                                        "shape": shape,
+                                        "key": key,
+                                        "full_match_str": full_match
+                                    })
+                        except:
+                            pass
+        except Exception as e:
+            log(f"Error scanning AI triggers: {e}")
+        return triggers
+
+    def replace_text_content(self, shape, old_str, new_str):
+        """
+        Replaces specific text content within a shape.
+        """
+        try:
+            if shape.HasTextFrame:
+                text_range = shape.TextFrame.TextRange
+                return text_range.Replace(FindWhat=old_str, ReplaceWhat=new_str)
+        except Exception as e:
+            log(f"Error replacing text content: {e}")
+            return False

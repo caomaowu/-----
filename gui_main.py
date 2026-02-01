@@ -5,6 +5,7 @@ import subprocess
 import threading
 import sys
 import datetime
+import json
 
 class ReportApp:
     def __init__(self, root):
@@ -31,6 +32,9 @@ class ReportApp:
         else:
             self.video_dir_var.set(os.getcwd())
         self.video_dir_b_var.set(self.video_dir_var.get())
+
+        self.ai_enabled_var = tk.BooleanVar(value=False)
+        self.load_ai_config()
 
         # Main Layout
         main_frame = ttk.Frame(root, padding="10")
@@ -77,6 +81,9 @@ class ReportApp:
         self.existing_ppt_var = tk.StringVar()
         self.existing_ppt_entry = ttk.Entry(config_frame, textvariable=self.existing_ppt_var, width=53)
         self.existing_ppt_btn = ttk.Button(config_frame, text="浏览...", command=self.browse_existing_ppt)
+
+        # 5. AI Toggle
+        ttk.Checkbutton(config_frame, text="启用 AI 分析 (OpenAI)", variable=self.ai_enabled_var).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
 
         # Action Section
         action_frame = ttk.Frame(main_frame, padding="10")
@@ -180,7 +187,36 @@ class ReportApp:
             if "generate_report.py" in self.script_combo['values']:
                 self.script_combo.set("generate_report.py")
 
+    def load_ai_config(self):
+        try:
+            if os.path.exists("config.json"):
+                with open("config.json", "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    self.ai_enabled_var.set(config.get("ai", {}).get("enabled", False))
+        except Exception as e:
+            print(f"Error loading config: {e}")
+
+    def update_ai_config(self):
+        try:
+            config = {}
+            if os.path.exists("config.json"):
+                with open("config.json", "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            
+            if "ai" not in config:
+                config["ai"] = {}
+            
+            config["ai"]["enabled"] = self.ai_enabled_var.get()
+            
+            with open("config.json", "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            self.log(f"Error updating config: {e}")
+
     def start_generation(self):
+        # Update config first
+        self.update_ai_config()
+
         script = self.script_var.get()
         template = self.template_var.get()
         video_dir = self.video_dir_var.get()

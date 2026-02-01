@@ -108,3 +108,5 @@ ipython_config.py
 *.wmv
 
 third_party/
+temp_exports/
+documents/
