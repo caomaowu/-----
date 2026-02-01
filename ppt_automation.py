@@ -429,6 +429,24 @@ class PPTAutomation:
             log(f"Error exporting SmartTag_{key}: {e}")
             return False
 
+    def check_val_placeholder_exists(self, key):
+        """
+        Checks if a text placeholder 'VAL_{key}' exists in the presentation.
+        """
+        target_text = f"VAL_{key}"
+        try:
+            for slide in self.pres.Slides:
+                for shape in slide.Shapes:
+                    if shape.HasTextFrame:
+                        try:
+                            if target_text in shape.TextFrame.TextRange.Text:
+                                return True
+                        except:
+                            pass
+        except:
+            pass
+        return False
+
     def replace_text_placeholder(self, key, value_str):
         """
         Replaces 'VAL_{key}' with value_str in all slides.

@@ -345,11 +345,54 @@ class DiagnoseApp:
         # Remove grid
         kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
         detected_lines_h = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_h)
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
+        # Increased kernel height for better vertical line removal
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
         detected_lines_v = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
         clean_binary = cv2.subtract(binary, detected_lines_h)
         clean_binary = cv2.subtract(clean_binary, detected_lines_v)
         
+        # --- Mask Top-Right Corner (Legend/Label Area) ---
+        h_chart, w_chart = clean_binary.shape[:2]
+        mask_h = int(h_chart * 0.08)
+        mask_w = int(w_chart * 0.45)
+        # Draw mask on debug image for visualization (Gray box)
+        mask_x_global = chart_start_x + (w_chart - mask_w)
+        cv2.rectangle(debug_img, (mask_x_global, 0), (chart_start_x + w_chart, mask_h), (100, 100, 100), -1)
+        cv2.putText(debug_img, "Masked", (mask_x_global, mask_h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Apply mask to binary
+        clean_binary[0:mask_h, (w_chart - mask_w):] = 0
+        
+        # --- Mask Bottom (X-Axis/Border Area) ---
+        mask_bottom_h = int(h_chart * 0.12)
+        # Draw mask on debug image (Gray box)
+        cv2.rectangle(debug_img, (chart_start_x, h_chart - mask_bottom_h), (chart_start_x + w_chart, h_chart), (100, 100, 100), -1)
+        cv2.putText(debug_img, "Masked Bottom", (chart_start_x + 10, h_chart - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Apply mask
+        clean_binary[(h_chart - mask_bottom_h):, :] = 0
+        # -------------------------------------------------
+
+        # --- Filter Vertical Lines by Aspect Ratio (Connected Components) ---
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(clean_binary, connectivity=8)
+        
+        for i in range(1, num_labels): # Skip background
+            x, y, w, h_comp, area = stats[i]
+            aspect_ratio = h_comp / float(w) if w > 0 else 0
+            
+            # Draw all components in faint gray for debug
+            # x_global = chart_start_x + x
+            # cv2.rectangle(debug_img, (x_global, y), (x_global + w, y + h_comp), (50, 50, 50), 1)
+
+            if aspect_ratio > 10 and h_comp > (h_chart * 0.2):
+                 clean_binary[labels == i] = 0
+                 # Visualize removed line in BLUE
+                 x_global = chart_start_x + x
+                 cv2.rectangle(debug_img, (x_global, y), (x_global + w, y + h_comp), (255, 0, 0), 2)
+                 cv2.putText(debug_img, f"RM AR={aspect_ratio:.1f}", (x_global, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+                 self.log(f"Removed vertical artifact: AR={aspect_ratio:.1f}, H={h_comp}")
+        # ------------------------------------------------------------------
+
         points = cv2.findNonZero(clean_binary)
         if points is None:
             self.log("FAILURE: No curve detected.")
@@ -361,13 +404,14 @@ class DiagnoseApp:
         
         # Rightmost
         sorted_points = points[points[:, 0].argsort()[::-1]]
-        top_n = min(20, len(sorted_points))
-        rightmost = sorted_points[:top_n]
         
-        for p in rightmost:
-            cv2.circle(debug_img, tuple(p), 3, (255, 0, 255), -1)
+        # User Request: Use the single last point (rightmost)
+        rightmost_point = sorted_points[0]
+        
+        # Draw the chosen point
+        cv2.circle(debug_img, tuple(rightmost_point), 5, (0, 0, 255), -1) # Red dot for final point
             
-        y_end_px = np.mean(rightmost[:, 1])
+        y_end_px = rightmost_point[1]
         cv2.line(debug_img, (0, int(y_end_px)), (w, int(y_end_px)), (255, 0, 255), 1)
         
         # Correct Linear Interpolation Logic

@@ -478,15 +478,50 @@ def detect_curve_end_value(image_path):
     _, binary = cv2.threshold(chart_area, 200, 255, cv2.THRESH_BINARY_INV)
     
     # Remove grid lines (thin horizontal/vertical lines)
+    # Increase kernel size for vertical lines to catch the green time indicator
     kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
     detected_lines_h = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_h)
     
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
+    # Increased height to 50 to better catch long vertical indicator lines
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50)) 
     detected_lines_v = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
     
     clean_binary = cv2.subtract(binary, detected_lines_h)
     clean_binary = cv2.subtract(clean_binary, detected_lines_v)
     
+    # --- Mask Top-Right Corner (Legend/Label Area) ---
+    # Avoid detecting legend lines as curve end
+    h_chart, w_chart = clean_binary.shape[:2]
+    # Mask area: Top 8% height, Right 45% width (Adjust as needed)
+    mask_h = int(h_chart * 0.08)
+    mask_w = int(w_chart * 0.45)
+    clean_binary[0:mask_h, (w_chart - mask_w):] = 0
+    
+    # --- Mask Bottom (X-Axis/Border Area) ---
+    # Avoid detecting X-axis ticks or bottom border as curve end
+    # Mask bottom 12%
+    mask_bottom_h = int(h_chart * 0.12)
+    clean_binary[(h_chart - mask_bottom_h):, :] = 0
+    # -------------------------------------------------
+
+    # --- Filter Vertical Lines by Aspect Ratio (Connected Components) ---
+    # Sometimes morphology misses lines if they are broken or slightly thick
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(clean_binary, connectivity=8)
+    
+    for i in range(1, num_labels): # Skip background (0)
+        x, y, w, h, area = stats[i]
+        
+        # Aspect Ratio = Height / Width
+        aspect_ratio = h / float(w) if w > 0 else 0
+        
+        # Heuristic: Vertical indicator lines are tall and narrow
+        # If AR > 10 and height is significant (> 20% of chart height), remove it
+        if aspect_ratio > 10 and h > (h_chart * 0.2):
+             # Set pixels of this component to 0
+             clean_binary[labels == i] = 0
+             log(f"DEBUG: Removed vertical line artifact (AR={aspect_ratio:.1f}, H={h})")
+    # ------------------------------------------------------------------
+
     points = cv2.findNonZero(clean_binary)
     if points is None:
         log(f"No curve detected in {image_path}")
@@ -498,12 +533,12 @@ def detect_curve_end_value(image_path):
     # Sort by x descending (rightmost first)
     points = points[points[:, 0].argsort()[::-1]]
     
-    # Take average of top 10 rightmost points
-    top_n = min(10, len(points))
-    rightmost_points = points[:top_n]
+    # User Request: Use the single last point (rightmost)
+    # points[0] is the rightmost point (max x)
+    rightmost_point = points[0]
     
-    y_end_avg_chart = np.mean(rightmost_points[:, 1])
-    log(f"DEBUG: Curve End Y (relative to chart): {y_end_avg_chart}")
+    y_end_avg_chart = rightmost_point[1]
+    log(f"DEBUG: Curve End Y (relative to chart): {y_end_avg_chart} (from point {rightmost_point})")
     
     # Map back to ROI coordinates (chart_area is offset by axis_width in X, but Y is same)
     y_end_roi = y_end_avg_chart

@@ -64,6 +64,11 @@ def generate_report(video_dir, template_path, output_path):
         os.makedirs(temp_export_dir)
         
     for key in processed_keys:
+        # Optimization: Only export and process if there is a VAL_ placeholder for this key
+        if not ppt.check_val_placeholder_exists(key):
+            # log(f"Skipping OCR for {key}: No VAL_{key} placeholder found.")
+            continue
+            
         export_path = os.path.join(temp_export_dir, f"{key}.png")
         if ppt.export_smarttag_image(key, export_path):
             value = detect_curve_end_value(export_path)
