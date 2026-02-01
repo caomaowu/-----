@@ -1,14 +1,33 @@
 import os
 import argparse
 import time
+import json
 from utils import log, extract_last_frame, load_config, find_media_file, detect_curve_end_value
 from ppt_automation import PPTAutomation
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+UNIT_CONFIG_PATH = os.path.join(BASE_DIR, "unit_config.json")
+
+def load_unit_config():
+    """Load unit conversion configuration from JSON file"""
+    if os.path.exists(UNIT_CONFIG_PATH):
+        try:
+            with open(UNIT_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                log(f"Loaded unit config from {UNIT_CONFIG_PATH}")
+                return json.load(f)
+        except Exception as e:
+            log(f"Error loading unit config: {e}")
+    else:
+        log("No unit_config.json found, using defaults.")
+    return {}
 
 def generate_report(video_dir, template_path, output_path):
     log("Starting report generation...")
+    
+    # Load unit config
+    unit_config_map = load_unit_config()
+
     log(f"Video Directory: {video_dir}")
     
     # config = load_config(CONFIG_PATH) # No longer needed for video_mapping
@@ -21,6 +40,20 @@ def generate_report(video_dir, template_path, output_path):
     ppt = PPTAutomation(template_path, output_path)
     if not ppt.open():
         return
+
+    # 1.5 Replace Metadata (name, date) on First Slide
+    try:
+        folder_name = os.path.basename(os.path.normpath(video_dir))
+        current_date_str = time.strftime("%Y.%m.%d")
+        
+        replacements = {
+            "name": folder_name,
+            "date": current_date_str
+        }
+        log(f"Replacing metadata on first slide: {replacements}")
+        ppt.replace_texts(replacements, only_first_slide=True)
+    except Exception as e:
+        log(f"Warning: Failed to replace metadata: {e}")
 
     # 2. Scan and Process
     log("Scanning slides for placeholders...")
@@ -77,7 +110,25 @@ def generate_report(video_dir, template_path, output_path):
             # (Optional: can be enabled by a flag, but for now let's keep clean)
             
             if value is not None:
-                val_str = f"{value:.3e}"
+                # Check for unit conversion config
+                if key in unit_config_map:
+                    config = unit_config_map[key]
+                    scale = config.get("scale", 1.0)
+                    unit = config.get("unit", "")
+                    fmt = config.get("format", "{:.3e}")
+                    
+                    converted_value = value * scale
+                    try:
+                        val_str = fmt.format(converted_value)
+                        if unit:
+                            val_str += f" {unit}"
+                    except Exception as e:
+                        log(f"Format error for {key}: {e}")
+                        val_str = f"{converted_value:.3e} {unit}"
+                else:
+                    # Default behavior
+                    val_str = f"{value:.3e}"
+
                 log(f"Detected value for {key}: {val_str}")
                 ppt.replace_text_placeholder(key, val_str)
             else:

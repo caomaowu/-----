@@ -1,0 +1,22 @@
+{
+    "TIJIJUANQI": {
+        "scale": 1000.0,
+        "unit": "g",
+        "format": "{:.4f}"
+    },
+    "tijiyanghua": {
+        "scale": 1000.0,
+        "unit": "g",
+        "format": "{:.3f}"
+    },
+    "suokongtiji": {
+        "scale": 1000000.0,
+        "unit": "cm^3",
+        "format": "{:.3f}"
+    },
+    "suokonglv": {
+        "scale": 1.0,
+        "unit": "%",
+        "format": "{:.2f}"
+    }
+}

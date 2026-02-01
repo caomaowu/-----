@@ -17,13 +17,22 @@
 
 ```
 自动化方案/
-├── gui_main.py              # 主程序 - GUI界面
-├── generate_report.py       # 普通报告生成脚本
-├── generate_compare_report.py # 对比报告生成脚本
-├── 自动化模板.pptx          # PPT模板文件
-├── 视频命名与位置、坐标.md   # 视频映射配置文件
-├── beifen/                  # 备份目录
-└── README.md               # 项目说明文档
+├── gui_main.py                  # 主程序 - GUI界面
+├── generate_report.py           # 普通报告生成脚本
+├── generate_compare_report.py   # 对比报告生成脚本
+├── generate_append_report.py    # 追加对比报告脚本
+├── diagnose_image.py            # OCR诊断工具
+├── ppt_automation.py            # PPT自动化核心类
+├── utils.py                     # 通用工具函数库
+├── 自动化模板4.pptx             # PPT模板文件
+├── config.json                  # 配置文件
+├── requirements.txt             # 依赖库列表
+├── 启动程序.bat                 # 快捷启动脚本
+├── 视频命名与位置、坐标.md      # 详细配置说明
+├── 视频/                        # 视频资源目录
+├── beifen/                      # 备份目录
+├── CHANGELOG.md                 # 更新日志
+└── README.md                    # 项目说明文档
 ```
 
 ## 环境要求
@@ -37,9 +46,9 @@
 - `opencv-python` (cv2)
 - `pywin32` (win32com)
 - `numpy`
-- `tkinter` (Python内置)
 - `pytesseract` (OCR支持)
 - `Pillow` (图像处理)
+- `tkinter` (Python内置)
 
 ## 安装步骤
 
@@ -76,7 +85,7 @@ python generate_report.py --template 自动化模板.pptx --video_dir 视频
 
 对比报告生成：
 ```bash
-python generate_compare_report.py --template 自动化模板.pptx --video_dir 视频
+python generate_compare_report.py --template 自动化模板4.pptx --video_dir 视频
 ```
 
 ## 视频文件映射规则
@@ -182,32 +191,4 @@ python diagnose_image.py [图片路径]
    - 确认PPT模板中的形状命名是否正确
    - 检查形状是否位于正确的幻灯片上
 
-## 更新日志
 
-- v2.3.0:
-  - **自动OCR读数**: 新增曲线图数值识别功能，支持自动填充 `VAL_` 开头的文本占位符。
-  - **诊断工具**: 提供 `diagnose_image.py` 可视化调试工具，支持动态调整识别参数。
-  - **智能抗干扰**: 采用聚类算法自动剔除 X 轴刻度和背景噪声干扰。
-- v2.2.0:
-  - **模糊匹配**: 增强文件查找逻辑，支持文件名容错（如拼写错误或轻微差异），优先精确匹配。
-- v2.1.0:
-  - **对象溯源**: 引入 `SmartTag` 机制，生成的视频自带身份标签，支持精准的二次追加对比。
-- v2.0.0 (Major):
-  - **去配置化重构**: 废弃配置文件映射，采用文件名直接匹配的自动化方案。
-  - **智能扫描**: 支持全量动态扫描 PPT 内容。
-  - **尺寸自适应**: 引入容器模式（Auto-Fit）和锚点模式（Auto-Expand）。
-  - **指令增强**: 支持 `_W`, `_H`, `_S` 等显式尺寸指令，且标签大小写不敏感。
-- v1.3.0:
-  - 优化视频/图片插入逻辑：支持自动保持原始长宽比并居中显示，解决画面拉伸变形问题
-  - 适用于普通生成模式和对比生成模式
-- v1.2.0: 
-  - 修复视频无法在他人电脑播放的问题（改为嵌入模式）
-  - 新增"已有PPT+新视频对比"功能
-  - 优化GUI界面，支持双击启动
-  - 自动根据视频文件夹和日期命名生成文件
-  - 新增 qiya.mp4 视频支持
-- v1.1.0: 添加GUI界面，支持对比报告生成
-- v1.0.0: 初始版本，支持基本报告生成功能
-
-
-**提示**: 使用前请仔细阅读视频命名与位置、坐标.md文件，了解详细的配置规则和使用说明。

@@ -468,3 +468,47 @@ class PPTAutomation:
                 log(f"Replaced {count} occurrences of {target_text}")
         except Exception as e:
             log(f"Error replacing text {target_text}: {e}")
+
+    def replace_texts(self, replacements, only_first_slide=True):
+        """
+        Batch replace texts in the presentation.
+        replacements: dict of {target: replacement}
+        only_first_slide: if True, only process the first slide.
+        """
+        try:
+            slides_to_process = []
+            if only_first_slide:
+                if self.pres.Slides.Count > 0:
+                    slides_to_process.append(self.pres.Slides[0])
+            else:
+                slides_to_process = list(self.pres.Slides)
+                
+            count = 0
+            for slide in slides_to_process:
+                for shape in slide.Shapes:
+                    if shape.HasTextFrame:
+                        try:
+                            text_range = shape.TextFrame.TextRange
+                            original_text = text_range.Text
+                            
+                            for target, value in replacements.items():
+                                if target in original_text:
+                                    # Use a loop to replace all occurrences within the text range
+                                    # Note: text_range.Text changes after replacement, so we check continuously
+                                    # But Replace method usually handles one instance.
+                                    # A safer way with COM Replace is to call it until no change or use it once if we expect one.
+                                    # Given "name-Title", one replace is usually enough, but let's be robust.
+                                    
+                                    # Simple approach: Try replace. 
+                                    if text_range.Replace(FindWhat=target, ReplaceWhat=value):
+                                        count += 1
+                                        # Refresh original_text for next target check if needed?
+                                        # Actually Replace modifies the object in place.
+                        except Exception as inner_e:
+                            pass
+                            
+            if count > 0:
+                log(f"Replaced {count} text occurrences based on metadata.")
+                
+        except Exception as e:
+            log(f"Error in replace_texts: {e}")
