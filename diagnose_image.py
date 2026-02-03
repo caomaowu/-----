@@ -5,7 +5,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 from PIL import Image, ImageTk
-from utils import run_tesseract_custom, extract_float
+from utils import run_tesseract_custom, extract_float, load_config
 
 # Increase max pixels to avoid DOS errors on large images
 Image.MAX_IMAGE_PIXELS = None
@@ -24,6 +24,13 @@ class DiagnoseApp:
         # Parameters
         self.crop_ratio_var = tk.DoubleVar(value=0.5)
         self.axis_width_ratio_var = tk.DoubleVar(value=0.2)
+        self.positive_only = False
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            config = load_config(config_path)
+            self.positive_only = config.get("ocr", {}).get("positive_only", False)
+        except Exception:
+            self.positive_only = False
         
         self._setup_ui()
         
@@ -235,9 +242,27 @@ class DiagnoseApp:
         
         self.log(f"Axis Search Width: {axis_width} ({axis_ratio:.1%})")
         
-        scale = 2
+        # Advanced Preprocessing for OCR (Fix 0.x -> 6.0 issue)
+        scale = 4
         roi_large = cv2.resize(axis_roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        data = run_tesseract_custom(roi_large)
+        
+        # 1. Gaussian Blur to reduce noise
+        roi_blur = cv2.GaussianBlur(roi_large, (3, 3), 0)
+        
+        # 2. Adaptive Threshold (better for small details like decimals)
+        roi_thresh = cv2.adaptiveThreshold(roi_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                         cv2.THRESH_BINARY, 31, 10)
+        
+        # 3. Erosion (Thicken text/dots on white background)
+        kernel = np.ones((2,2), np.uint8)
+        roi_processed = cv2.erode(roi_thresh, kernel, iterations=1)
+        
+        # Save debug image
+        debug_ocr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_ocr_last_run.png")
+        cv2.imwrite(debug_ocr_path, roi_processed)
+        self.log(f"Saved OCR debug image to: {debug_ocr_path}")
+        
+        data = run_tesseract_custom(roi_processed)
         
         y_values = []
         if data:
@@ -273,65 +298,20 @@ class DiagnoseApp:
                     cv2.rectangle(debug_img, (x, y), (x + w_box, y + h_box), (0, 255, 255), 1)
                     cv2.putText(debug_img, str(val), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-        # Filter: Separation of Y-axis and X-axis
+        candidate_bins = []
         if len(y_values) >= 2:
-            # Cluster by X-coordinate (20px bins)
             bin_width = 20
             bins = {}
             for v in y_values:
                 bin_idx = int(v['x_center'] / bin_width)
-                if bin_idx not in bins: bins[bin_idx] = []
+                if bin_idx not in bins:
+                    bins[bin_idx] = []
                 bins[bin_idx].append(v)
-            
-            # Find best bin (most items, tie-break left)
-            best_bin = None
-            max_count = 0
-            for bin_idx, items in bins.items():
-                if len(items) > max_count:
-                    max_count = len(items)
-                    best_bin = items
-                elif len(items) == max_count:
-                    if best_bin and bin_idx < int(best_bin[0]['x_center'] / bin_width):
-                        best_bin = items
-            
-            aligned_y_values = []
-            if best_bin:
-                selected_x = [v['x_center'] for v in best_bin]
-                median_x = np.median(selected_x)
-                
-                # Strict filter +/- 15px
-                for v in y_values:
-                    if abs(v['x_center'] - median_x) < 15:
-                        aligned_y_values.append(v)
-                        # Draw accepted in GREEN
-                        x, y, w_box, h_box = v['rect']
-                        cv2.rectangle(debug_img, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
-                        cv2.putText(debug_img, str(v['val']), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                    else:
-                        # Draw rejected in RED
-                        x, y, w_box, h_box = v['rect']
-                        cv2.rectangle(debug_img, (x, y), (x + w_box, y + h_box), (0, 0, 255), 1)
-            
-            if len(aligned_y_values) >= 2:
-                y_values = aligned_y_values
-            else:
-                y_values = [] # Fail if no valid column found
-
-        self.log(f"Found {len(y_values)} numbers (after filtering).")
-        
-        if len(y_values) < 2:
+            candidate_bins = sorted(bins.items(), key=lambda x: (-len(x[1]), x[0]))
+        else:
             self.log("FAILURE: Not enough Y-axis labels.")
             self.display_preview(debug_img)
             return
-            
-        y_values.sort(key=lambda v: v['y_center'])
-        y_top_px = y_values[0]['y_center']
-        val_top = y_values[0]['val']
-        y_bottom_px = y_values[-1]['y_center']
-        val_bottom = y_values[-1]['val']
-        
-        self.log(f"Top: {val_top} @ {y_top_px:.1f}px")
-        self.log(f"Bottom: {val_bottom} @ {y_bottom_px:.1f}px")
         
         # 3. Curve
         chart_start_x = crop_x_start + axis_width
@@ -414,15 +394,54 @@ class DiagnoseApp:
         y_end_px = rightmost_point[1]
         cv2.line(debug_img, (0, int(y_end_px)), (w, int(y_end_px)), (255, 0, 255), 1)
         
-        # Correct Linear Interpolation Logic
-        # slope = (val_bottom - val_top) / (y_bottom_px - y_top_px)
-        # result = val_top + slope * (y_current - y_top_px)
+        if not candidate_bins:
+            self.log("FAILURE: Not enough Y-axis labels.")
+            self.display_preview(debug_img)
+            return
         
-        if (y_bottom_px - y_top_px) != 0:
+        chosen = None
+        for bin_idx, items in candidate_bins:
+            selected_x = [v['x_center'] for v in items]
+            median_x = np.median(selected_x)
+            aligned = [v for v in y_values if abs(v['x_center'] - median_x) < 15]
+            if self.positive_only:
+                aligned = [v for v in aligned if v['val'] >= 0]
+            if len(aligned) < 2:
+                continue
+            aligned.sort(key=lambda v: v['y_center'])
+            y_top_px = aligned[0]['y_center']
+            val_top = aligned[0]['val']
+            y_bottom_px = aligned[-1]['y_center']
+            val_bottom = aligned[-1]['val']
+            if (y_bottom_px - y_top_px) == 0:
+                continue
             slope = (val_bottom - val_top) / (y_bottom_px - y_top_px)
             result = val_top + slope * (y_end_px - y_top_px)
-        else:
-            result = 0.0
+            if self.positive_only and val_top >= 0 and val_bottom >= 0 and result < 0:
+                self.log(f"Positive-only enabled; negative result {result} from bin {bin_idx}, retrying")
+                continue
+            chosen = (aligned, median_x, result, y_top_px, val_top, y_bottom_px, val_bottom)
+            break
+        
+        if not chosen:
+            self.log("FAILURE: No valid positive mapping.")
+            self.display_preview(debug_img)
+            return
+        
+        aligned, median_x, result, y_top_px, val_top, y_bottom_px, val_bottom = chosen
+        
+        for v in y_values:
+            if abs(v['x_center'] - median_x) < 15 and (not self.positive_only or v['val'] >= 0):
+                x, y, w_box, h_box = v['rect']
+                cv2.rectangle(debug_img, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
+                cv2.putText(debug_img, str(v['val']), (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            else:
+                x, y, w_box, h_box = v['rect']
+                cv2.rectangle(debug_img, (x, y), (x + w_box, y + h_box), (0, 0, 255), 1)
+        
+        self.log(f"Found {len(aligned)} numbers (after filtering).")
+        self.log(f"Top: {val_top} @ {y_top_px:.1f}px")
+        self.log(f"Bottom: {val_bottom} @ {y_bottom_px:.1f}px")
         
         self.log(f"Curve End Y: {y_end_px:.1f}")
         self.log(f"RESULT: {result:.4e}")

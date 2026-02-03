@@ -288,7 +288,7 @@ def run_tesseract_custom(image):
             try: os.remove(temp_name)
             except: pass
 
-def detect_curve_end_value(image_path):
+def detect_curve_end_value(image_path, positive_only=False):
     """
     Detects the Y-coordinate value of the curve's end point in the right half of the image.
     """
@@ -321,10 +321,21 @@ def detect_curve_end_value(image_path):
     axis_roi = gray[:, :axis_width]
     
     # Upscale for better OCR
-    scale = 2
+    scale = 4
     roi_large = cv2.resize(axis_roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
-    data = run_tesseract_custom(roi_large)
+    # 1. Gaussian Blur
+    roi_blur = cv2.GaussianBlur(roi_large, (3, 3), 0)
+    
+    # 2. Adaptive Threshold
+    roi_thresh = cv2.adaptiveThreshold(roi_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY, 31, 10)
+                                     
+    # 3. Erosion (Thicken text)
+    kernel = np.ones((2,2), np.uint8)
+    roi_processed = cv2.erode(roi_thresh, kernel, iterations=1)
+    
+    data = run_tesseract_custom(roi_processed)
     if not data:
         return None
         
@@ -354,17 +365,6 @@ def detect_curve_end_value(image_path):
         log(f"OCR failed to find enough Y-axis labels in {image_path}")
         return None
         
-    # Improved Axis Separation Logic
-    # Goal: Separate Y-axis labels (vertically stacked) from X-axis labels (horizontally spread at bottom)
-    
-    # 1. Cluster by X-coordinate
-    # Y-axis labels should have very similar X-coordinates (low variance)
-    # X-axis labels will have different X-coordinates (high variance)
-    
-    # We use a histogram/binning approach to find the "main vertical column"
-    x_coords = [v['x_center'] for v in y_values]
-    
-    # Bin width of 20 pixels
     bin_width = 20
     bins = {}
     
@@ -374,100 +374,10 @@ def detect_curve_end_value(image_path):
             bins[bin_idx] = []
         bins[bin_idx].append(v)
         
-    # Find the bin with the most items (assuming Y-axis has more labels than X-axis labels that accidentally fell into this zone)
-    # Or simply, the Y-axis is usually the leftmost dominant column in the search zone
+    candidate_bins = sorted(bins.items(), key=lambda x: (-len(x[1]), x[0]))
     
-    best_bin = None
-    max_count = 0
-    
-    for bin_idx, items in bins.items():
-        if len(items) > max_count:
-            max_count = len(items)
-            best_bin = items
-        elif len(items) == max_count:
-            # If tie, prefer the leftmost one (smaller bin_idx)
-            if best_bin and bin_idx < int(best_bin[0]['x_center'] / bin_width):
-                best_bin = items
-    
-    if not best_bin or len(best_bin) < 2:
+    if not candidate_bins:
         log(f"Could not identify a valid Y-axis column in {image_path}")
-        return None
-        
-    # 2. Refine the selected column
-    # Calculate median X of the best bin
-    selected_x = [v['x_center'] for v in best_bin]
-    median_x = np.median(selected_x)
-    
-    # Strict filter: keep points within +/- 15px of median X
-    aligned_y_values = []
-    for v in y_values: # Check ALL points again, not just bin, to catch edge cases
-        if abs(v['x_center'] - median_x) < 15:
-            aligned_y_values.append((v['y_center'], v['val']))
-            
-    if len(aligned_y_values) < 2:
-        log(f"Not enough aligned Y-axis labels found in {image_path}")
-        return None
-        
-    y_values = aligned_y_values
-        
-    # Sort by Y position (top to bottom)
-    y_values.sort(key=lambda x: x[0])
-    
-    # Filter outliers using slope consistency
-    if len(y_values) > 2:
-        # Calculate slopes between adjacent points
-        slopes = []
-        for i in range(len(y_values) - 1):
-            dy = y_values[i+1][0] - y_values[i][0]
-            dv = y_values[i+1][1] - y_values[i][1]
-            if abs(dv) > 1e-9:
-                slopes.append(dy / dv)
-        
-        if slopes:
-            median_slope = np.median(slopes)
-            
-            # Filter based on consistency with median slope from a pivot point
-            mid_idx = len(y_values) // 2
-            pivot = y_values[mid_idx]
-            
-            filtered_y_values = []
-            for p in y_values:
-                # Always keep pivot
-                if p == pivot:
-                    filtered_y_values.append(p)
-                    continue
-                    
-                dy = p[0] - pivot[0]
-                dv = p[1] - pivot[1]
-                
-                if abs(dv) < 1e-9:
-                    continue # Ignore points with same value as pivot (unless very close in Y)
-                    
-                slope = dy / dv
-                
-                # Check deviation from median slope
-                # If slope has same sign and magnitude is within factor of 3
-                if (slope * median_slope > 0) and (0.33 < abs(slope / median_slope) < 3.0):
-                    filtered_y_values.append(p)
-            
-            if len(filtered_y_values) >= 2:
-                y_values = filtered_y_values
-                y_values.sort(key=lambda x: x[0])
-                
-    # Debug logs
-    log(f"DEBUG: OCR found {len(y_values)} values: {y_values}")
-    
-    # Use top-most (max value) and bottom-most (min value) for mapping
-    y_top_px, val_top = y_values[0]
-    y_bottom_px, val_bottom = y_values[-1]
-    
-    log(f"DEBUG: Top: {val_top} at {y_top_px}px, Bottom: {val_bottom} at {y_bottom_px}px")
-    
-    pixel_range = y_bottom_px - y_top_px
-    value_range = val_top - val_bottom # Top pixel corresponds to higher value
-    
-    if abs(pixel_range) < 10 or abs(value_range) == 0:
-        log("Invalid axis detected (range too small)")
         return None
         
     # 4. Find Curve End (Rightmost dark pixel)
@@ -543,21 +453,71 @@ def detect_curve_end_value(image_path):
     # Map back to ROI coordinates (chart_area is offset by axis_width in X, but Y is same)
     y_end_roi = y_end_avg_chart
     
-    # 5. Map y_end to value
-    # Linear interpolation
-    # ratio = (current_y - top_y) / (bottom_y - top_y)
-    # val = top_val - ratio * (top_val - bottom_val)
-    # Note: top_y is smaller pixel value (higher in image), top_val is usually larger number
-    # bottom_y is larger pixel value (lower in image), bottom_val is usually smaller number
+    def build_axis_values(items):
+        selected_x = [v['x_center'] for v in items]
+        median_x = np.median(selected_x)
+        aligned = []
+        for v in y_values:
+            if abs(v['x_center'] - median_x) < 15:
+                if (not positive_only) or v['val'] >= 0:
+                    aligned.append((v['y_center'], v['val']))
+        if len(aligned) < 2:
+            return None
+        aligned.sort(key=lambda x: x[0])
+        if len(aligned) > 2:
+            slopes = []
+            for i in range(len(aligned) - 1):
+                dy = aligned[i+1][0] - aligned[i][0]
+                dv = aligned[i+1][1] - aligned[i][1]
+                if abs(dv) > 1e-9:
+                    slopes.append(dy / dv)
+            if slopes:
+                median_slope = np.median(slopes)
+                mid_idx = len(aligned) // 2
+                pivot = aligned[mid_idx]
+                filtered = []
+                for p in aligned:
+                    if p == pivot:
+                        filtered.append(p)
+                        continue
+                    dy = p[0] - pivot[0]
+                    dv = p[1] - pivot[1]
+                    if abs(dv) < 1e-9:
+                        continue
+                    slope = dy / dv
+                    if (slope * median_slope > 0) and (0.33 < abs(slope / median_slope) < 3.0):
+                        filtered.append(p)
+                if len(filtered) >= 2:
+                    aligned = filtered
+                    aligned.sort(key=lambda x: x[0])
+        y_top_px, val_top = aligned[0]
+        y_bottom_px, val_bottom = aligned[-1]
+        pixel_range = y_bottom_px - y_top_px
+        value_range = val_top - val_bottom
+        if abs(pixel_range) < 10 or abs(value_range) == 0:
+            return None
+        return aligned, y_top_px, val_top, y_bottom_px, val_bottom
     
-    # Check if axis is inverted (Top pixel val > Bottom pixel val)
-    # Standard chart: Top Y (small px) -> Max Val, Bottom Y (large px) -> Min Val
+    chosen = None
+    for bin_idx, items in candidate_bins:
+        axis_data = build_axis_values(items)
+        if not axis_data:
+            continue
+        aligned, y_top_px, val_top, y_bottom_px, val_bottom = axis_data
+        slope = (val_bottom - val_top) / (y_bottom_px - y_top_px)
+        value = val_top + slope * (y_end_roi - y_top_px)
+        if positive_only and val_top >= 0 and val_bottom >= 0 and value < 0:
+            log(f"DEBUG: Positive-only enabled; negative result {value} from bin {bin_idx}, retrying")
+            continue
+        chosen = (value, y_top_px, val_top, y_bottom_px, val_bottom, aligned)
+        break
     
-    # Let's use a more robust linear fit if we have many points, but for now 2 points is enough
-    # slope m = (val_bottom - val_top) / (y_bottom_px - y_top_px)
-    # val = val_top + m * (y_current - y_top_px)
+    if not chosen:
+        log("Invalid axis detected (no valid positive mapping)")
+        return None
     
-    slope = (val_bottom - val_top) / (y_bottom_px - y_top_px)
-    value = val_top + slope * (y_end_roi - y_top_px)
+    value, y_top_px, val_top, y_bottom_px, val_bottom, y_values = chosen
+    log(f"DEBUG: OCR found {len(y_values)} values: {y_values}")
+    log(f"DEBUG: Top: {val_top} at {y_top_px}px, Bottom: {val_bottom} at {y_bottom_px}px")
     
     return value

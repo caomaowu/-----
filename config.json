@@ -3,7 +3,7 @@
         "compare_text": "（左）方案一                                                                                （右）方案二"
     },
     "ai": {
-        "enabled": true,
+        "enabled": false,
         "base_url": "https://apis.iflow.cn/v1",
         "api_key_env": "sk-76befb57fa51974916193af97e7a88fd",
         "active_model": "qwen3-vl-plus",
@@ -21,5 +21,8 @@
         ],
         "timeout_sec": 60,
         "retry_max_attempts": 2
+    },
+    "ocr": {
+        "positive_only": true
     }
 }

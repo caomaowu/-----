@@ -111,6 +111,8 @@ def generate_report(video_dir, template_path, output_path):
     if not os.path.exists(temp_export_dir):
         os.makedirs(temp_export_dir)
         
+    positive_only = main_config.get("ocr", {}).get("positive_only", False)
+        
     for key in processed_keys:
         # Optimization: Only export and process if there is a VAL_ placeholder for this key
         if not ppt.check_val_placeholder_exists(key):
@@ -119,7 +121,7 @@ def generate_report(video_dir, template_path, output_path):
             
         export_path = os.path.join(temp_export_dir, f"{key}.png")
         if ppt.export_smarttag_image(key, export_path):
-            value = detect_curve_end_value(export_path)
+            value = detect_curve_end_value(export_path, positive_only=positive_only)
             
             # Debug: Save debug image if recognition failed or just for trace
             # (Optional: can be enabled by a flag, but for now let's keep clean)
