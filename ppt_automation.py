@@ -1,14 +1,19 @@
 import os
+import re
 import win32com.client
 from utils import log, get_media_size, calculate_centered_rect, split_rect
 
 class PPTAutomation:
+    VAL_PATTERN = re.compile(r"VAL_([a-zA-Z0-9_\u4e00-\u9fa5]+)")
+
     def __init__(self, template_path, output_path, config_labels=None):
         self.template_path = template_path
         self.output_path = output_path
         self.ppt_app = None
         self.pres = None
         self.config_labels = config_labels or {}
+        self._smarttag_index = None
+        self._val_placeholder_index = None
         
     def open(self):
         log("Opening PPT Application...")
@@ -50,6 +55,49 @@ class PPTAutomation:
             self.ppt_app.Quit()
         except:
             pass
+
+    def invalidate_shape_indexes(self):
+        self._smarttag_index = None
+        self._val_placeholder_index = None
+
+    def _ensure_shape_indexes(self):
+        if self._smarttag_index is not None and self._val_placeholder_index is not None:
+            return
+
+        smarttags = {}
+        val_placeholders = {}
+        try:
+            for slide in self.pres.Slides:
+                for shape in slide.Shapes:
+                    try:
+                        name = shape.Name
+                    except Exception:
+                        name = ""
+
+                    if name.startswith("SmartTag_"):
+                        smarttags[name.replace("SmartTag_", "")] = shape
+
+                    has_text = False
+                    try:
+                        has_text = bool(shape.HasTextFrame)
+                    except Exception:
+                        has_text = False
+
+                    if not has_text:
+                        continue
+
+                    try:
+                        text = shape.TextFrame.TextRange.Text or ""
+                    except Exception:
+                        continue
+
+                    for key in self.VAL_PATTERN.findall(text):
+                        val_placeholders.setdefault(key, []).append(shape)
+        except Exception as e:
+            log(f"Error building PPT indexes: {e}")
+
+        self._smarttag_index = smarttags
+        self._val_placeholder_index = val_placeholders
 
     def _parse_tag(self, text):
         """
@@ -255,6 +303,7 @@ class PPTAutomation:
             log(f"Inserting {os.path.basename(media_path)} at Slide {slide.SlideIndex}")
             key = action.get("key")
             self._insert_media_object(slide, media_path, target_left, target_top, target_width, target_height, is_video, key=key)
+            self.invalidate_shape_indexes()
             
         except Exception as e:
             log(f"Error processing placeholder {action.get('key')}: {e}")
@@ -297,6 +346,7 @@ class PPTAutomation:
                 log(f"Warning: Missing B media: {media_path_b}")
 
             self._add_comparison_label(slide, rect)
+            self.invalidate_shape_indexes()
             
         except Exception as e:
             log(f"Error in insert_comparison: {e}")
@@ -407,6 +457,7 @@ class PPTAutomation:
             
             # Label
             self._add_comparison_label(slide, (container_rect[0], text_top, container_rect[2], 30))
+            self.invalidate_shape_indexes()
                 
         except Exception as e:
             log(f"Error in insert_comparison_with_smart_tag on Slide {slide.SlideIndex}: {e}")
@@ -416,13 +467,12 @@ class PPTAutomation:
         Exports the shape named 'SmartTag_{key}' to the output path.
         """
         try:
-            target_name = f"SmartTag_{key}"
-            for slide in self.pres.Slides:
-                for shape in slide.Shapes:
-                    if shape.Name == target_name:
-                        # 2 = ppShapeFormatPNG
-                        shape.Export(output_path, 2)
-                        return True
+            self._ensure_shape_indexes()
+            shape = (self._smarttag_index or {}).get(key)
+            if shape is not None:
+                # 2 = ppShapeFormatPNG
+                shape.Export(output_path, 2)
+                return True
             log(f"SmartTag_{key} not found for export.")
             return False
         except Exception as e:
@@ -433,19 +483,8 @@ class PPTAutomation:
         """
         Checks if a text placeholder 'VAL_{key}' exists in the presentation.
         """
-        target_text = f"VAL_{key}"
-        try:
-            for slide in self.pres.Slides:
-                for shape in slide.Shapes:
-                    if shape.HasTextFrame:
-                        try:
-                            if target_text in shape.TextFrame.TextRange.Text:
-                                return True
-                        except:
-                            pass
-        except:
-            pass
-        return False
+        self._ensure_shape_indexes()
+        return key in (self._val_placeholder_index or {})
 
     def replace_text_placeholder(self, key, value_str):
         """
@@ -454,18 +493,22 @@ class PPTAutomation:
         target_text = f"VAL_{key}"
         count = 0
         try:
-            for slide in self.pres.Slides:
-                for shape in slide.Shapes:
-                    if shape.HasTextFrame:
-                        try:
-                            text_range = shape.TextFrame.TextRange
-                            if target_text in text_range.Text:
-                                text_range.Replace(FindWhat=target_text, ReplaceWhat=value_str)
-                                count += 1
-                        except:
-                            pass
+            self._ensure_shape_indexes()
+            shapes = list((self._val_placeholder_index or {}).get(key, []))
+            if not shapes:
+                return
+
+            for shape in shapes:
+                try:
+                    text_range = shape.TextFrame.TextRange
+                    if target_text in text_range.Text:
+                        while text_range.Replace(FindWhat=target_text, ReplaceWhat=value_str):
+                            count += 1
+                except Exception:
+                    pass
             if count > 0:
                 log(f"Replaced {count} occurrences of {target_text}")
+                self.invalidate_shape_indexes()
         except Exception as e:
             log(f"Error replacing text {target_text}: {e}")
 

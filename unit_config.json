@@ -2,7 +2,7 @@
     "TIJIJUANQI": {
         "scale": 1000.0,
         "unit": "g",
-        "format": "{:.4f}"
+        "format": "{:.3f}"
     },
     "tijiyanghua": {
         "scale": 1000.0,

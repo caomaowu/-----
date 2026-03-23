@@ -11,6 +11,7 @@ import tempfile
 import csv
 import io
 import subprocess
+import math
 
 # Tesseract Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -217,8 +218,9 @@ def find_media_file(directory, key):
 
 FLOAT_PATTERN = re.compile(r"-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
 FULL_SCI_PATTERN = re.compile(r"-?(?:\d+\.\d*|\.\d+|\d+)[eE][-+]?\d+$")
+EXPONENT_FRAGMENT_PATTERN = re.compile(r"[eE]\s*([+-]?\d+)")
 DEFAULT_CROP_RATIO = 0.475
-DEFAULT_AXIS_RATIOS = (0.18, 0.20, 0.22, 0.25, 0.155)
+DEFAULT_AXIS_RATIOS = (0.25, 0.22, 0.20, 0.18, 0.155)
 
 def extract_float(text):
     """Extract all float numbers from text, including decimals like .015 or -.015."""
@@ -316,9 +318,173 @@ def _prepare_axis_ocr_variants(axis_roi, scale=4):
     _, otsu = cv2.threshold(roi_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return scale, [("adaptive", adaptive), ("otsu", otsu), ("gray", roi_large)]
 
-def _collect_axis_candidates(axis_roi, crop_x_start, scale=4, conf_threshold=25):
+def _dedupe_axis_candidates(candidates):
+    deduped = []
+    for candidate in sorted(candidates, key=lambda item: item['conf'], reverse=True):
+        duplicate = False
+        for kept in deduped:
+            same_position = (
+                abs(candidate['x_center'] - kept['x_center']) <= 8
+                and abs(candidate['y_center'] - kept['y_center']) <= 6
+            )
+            if same_position:
+                duplicate = True
+                break
+        if not duplicate:
+            deduped.append(candidate)
+    return deduped
+
+def _infer_scientific_exponent(raw_tokens):
+    magnitude_scores = {}
+    negative_scores = {}
+    positive_scores = {}
+    loose_negative_tokens = 0
+
+    for token in raw_tokens:
+        text = token.get('text', '')
+        conf = max(0.0, float(token.get('conf', 0.0)))
+        weight = 1.0 + (conf / 100.0)
+
+        if '-7' in text:
+            magnitude_scores[7] = magnitude_scores.get(7, 0.0) + weight
+            negative_scores[7] = negative_scores.get(7, 0.0) + 2.0 + weight
+        if '+' in text:
+            for match in re.findall(r"\+(\d+)", text):
+                try:
+                    exp_mag = abs(int(match))
+                except ValueError:
+                    continue
+                magnitude_scores[exp_mag] = magnitude_scores.get(exp_mag, 0.0) + weight
+                positive_scores[exp_mag] = positive_scores.get(exp_mag, 0.0) + 1.5 + weight
+        if '-' in text:
+            loose_negative_tokens += 1
+
+        for match in EXPONENT_FRAGMENT_PATTERN.finditer(text):
+            exp_text = match.group(1)
+            try:
+                exp = int(exp_text)
+            except ValueError:
+                continue
+
+            exp_mag = abs(exp)
+            magnitude_scores[exp_mag] = magnitude_scores.get(exp_mag, 0.0) + weight
+            if exp_text.startswith('-'):
+                negative_scores[exp_mag] = negative_scores.get(exp_mag, 0.0) + 2.0 + weight
+            elif exp_text.startswith('+'):
+                positive_scores[exp_mag] = positive_scores.get(exp_mag, 0.0) + 1.5 + weight
+
+    if not magnitude_scores:
+        return None
+
+    exp_mag, score = max(magnitude_scores.items(), key=lambda item: (item[1], -item[0]))
+    if score < 2.0:
+        return None
+
+    neg_score = negative_scores.get(exp_mag, 0.0) + (1.5 * loose_negative_tokens)
+    pos_score = positive_scores.get(exp_mag, 0.0)
+    sign = -1 if neg_score >= pos_score else 1
+    return sign * exp_mag
+
+def _build_scientific_notation_candidates(raw_tokens, exponent_hint, crop_x_start):
+    if exponent_hint is None or exponent_hint > -3:
+        return []
+
+    synthesized = []
+    for token in raw_tokens:
+        text = token.get('text', '')
+        conf = float(token.get('conf', 0.0))
+        if conf < 15:
+            continue
+
+        normalized = _normalize_numeric_text(text)
+        if not normalized or 'e' in normalized.lower():
+            continue
+
+        trimmed = normalized[:-1] if normalized.endswith('.') else normalized
+        if any(ch == '.' for ch in trimmed):
+            continue
+
+        digits = ''.join(ch for ch in trimmed if ch.isdigit())
+        if len(digits) < 4:
+            continue
+
+        significant = digits.lstrip('0')
+        if len(significant) < 4:
+            continue
+
+        mantissa = int(significant) / (10 ** (len(significant) - 1))
+        value = mantissa * (10 ** exponent_hint)
+        synth_text = f"{mantissa:.{len(significant) - 1}f}e{exponent_hint}"
+
+        x_rel = token['left'] / token['scale']
+        y_rel = token['top'] / token['scale']
+        w_box = max(1, int(round(token['width'] / token['scale'])))
+        h_box = max(1, int(round(token['height'] / token['scale'])))
+
+        synthesized.append({
+            'val': value,
+            'text': synth_text,
+            'conf': conf + 8.0,
+            'source': f"{token['source']}/sci-hint",
+            'x_center': x_rel + w_box / 2.0,
+            'y_center': y_rel + h_box / 2.0,
+            'rect': (int(round(crop_x_start + x_rel)), int(round(y_rel)), w_box, h_box),
+        })
+
+    return synthesized
+
+def _axis_model_is_confident(axis_model, roi_height):
+    if not axis_model:
+        return False
+
+    inliers = axis_model.get('inliers', [])
+    if len(inliers) < 4:
+        return False
+
+    span = axis_model['y_bottom_px'] - axis_model['y_top_px']
+    if span < max(120.0, roi_height * 0.38):
+        return False
+
+    mean_conf = float(np.mean([item['conf'] for item in inliers])) if inliers else -1.0
+    if mean_conf < 35.0:
+        return False
+
+    distinct_values = {
+        round(float(item['val']), 6)
+        for item in inliers
+        if math.isfinite(float(item['val']))
+    }
+    return len(distinct_values) >= 4
+
+def _axis_model_is_usable(axis_model, roi_height):
+    if not axis_model:
+        return False
+
+    inliers = axis_model.get('inliers', [])
+    if len(inliers) < 2:
+        return False
+
+    span = axis_model['y_bottom_px'] - axis_model['y_top_px']
+    if span < max(260.0, roi_height * 0.55):
+        return False
+
+    mean_conf = float(np.mean([item['conf'] for item in inliers])) if inliers else -1.0
+    if mean_conf < 40.0:
+        return False
+
+    distinct_values = {
+        round(float(item['val']), 6)
+        for item in inliers
+        if math.isfinite(float(item['val']))
+    }
+    return len(distinct_values) >= 2
+
+def _collect_axis_candidates(axis_roi, crop_x_start, scale=4, conf_threshold=25, positive_only=False):
     scale, variants = _prepare_axis_ocr_variants(axis_roi, scale=scale)
     candidates = []
+    raw_tokens = []
+    best_candidates = []
+    best_model = None
 
     for source_name, processed in variants:
         for psm in (6, 11):
@@ -330,6 +496,16 @@ def _collect_axis_candidates(axis_roi, crop_x_start, scale=4, conf_threshold=25)
             for i in range(num_boxes):
                 text = _normalize_numeric_text(data['text'][i])
                 conf = data.get('conf', [-1] * num_boxes)[i]
+                raw_tokens.append({
+                    'text': text,
+                    'conf': conf,
+                    'left': data['left'][i],
+                    'top': data['top'][i],
+                    'width': data['width'][i],
+                    'height': data['height'][i],
+                    'scale': scale,
+                    'source': f"{source_name}/psm{psm}",
+                })
                 if not text or conf < conf_threshold:
                     continue
 
@@ -353,22 +529,27 @@ def _collect_axis_candidates(axis_roi, crop_x_start, scale=4, conf_threshold=25)
                     'rect': (int(round(crop_x_start + x_rel)), int(round(y_rel)), w_box, h_box),
                 })
 
-    deduped = []
-    for candidate in sorted(candidates, key=lambda item: item['conf'], reverse=True):
-        duplicate = False
-        for kept in deduped:
-            same_position = (
-                abs(candidate['x_center'] - kept['x_center']) <= 8
-                and abs(candidate['y_center'] - kept['y_center']) <= 6
-            )
-            same_value = abs(candidate['val'] - kept['val']) <= max(1e-4, abs(kept['val']) * 0.01)
-            if same_position and same_value:
-                duplicate = True
-                break
-        if not duplicate:
-            deduped.append(candidate)
+            deduped = _dedupe_axis_candidates(candidates)
+            axis_model = _select_axis_model(deduped, positive_only=positive_only)
+            if axis_model:
+                best_candidates = deduped
+                best_model = axis_model
+                if _axis_model_is_confident(axis_model, axis_roi.shape[0]):
+                    return best_candidates, best_model
 
-    return deduped
+    exponent_hint = _infer_scientific_exponent(raw_tokens)
+    if exponent_hint is not None:
+        candidates.extend(_build_scientific_notation_candidates(raw_tokens, exponent_hint, crop_x_start))
+
+    if best_model:
+        deduped = _dedupe_axis_candidates(candidates)
+        hinted_model = _select_axis_model(deduped, positive_only=positive_only)
+        if hinted_model and _score_axis_model(hinted_model) >= _score_axis_model(best_model):
+            return deduped, hinted_model
+        return best_candidates, best_model
+
+    deduped = _dedupe_axis_candidates(candidates)
+    return deduped, _select_axis_model(deduped, positive_only=positive_only)
 
 def _fit_axis_model(aligned, positive_only=False):
     if len(aligned) < 2:
@@ -389,7 +570,8 @@ def _fit_axis_model(aligned, positive_only=False):
             if abs(slope) < 1e-9 or slope >= 0:
                 continue
 
-            tol = max(abs(bottom['val'] - top['val']) * 0.08, abs(slope) * 8, 1e-4)
+            value_scale = max(abs(top['val']), abs(bottom['val']), abs(bottom['val'] - top['val']), 1e-9)
+            tol = max(abs(bottom['val'] - top['val']) * 0.08, abs(slope) * 8, value_scale * 0.02)
             inliers = []
             residual_sum = 0.0
 
@@ -465,11 +647,7 @@ def _select_axis_model(axis_candidates, positive_only=False):
         if not model:
             continue
 
-        score = (
-            len(model['inliers']),
-            model['y_bottom_px'] - model['y_top_px'],
-            np.mean([item['conf'] for item in model['inliers']]),
-        )
+        score = _score_axis_model(model)
         if (best is None) or (score > best['score']):
             best = {
                 'score': score,
@@ -502,11 +680,14 @@ def _resolve_axis_model(gray, crop_x_start, axis_ratio, positive_only=False):
     for ratio in ratios:
         axis_width = int(gray.shape[1] * ratio)
         axis_roi = gray[:, :axis_width]
-        axis_candidates = _collect_axis_candidates(axis_roi, crop_x_start)
-        if len(axis_candidates) < 2:
+        axis_candidates, axis_model = _collect_axis_candidates(
+            axis_roi,
+            crop_x_start,
+            positive_only=positive_only,
+        )
+        if len(axis_candidates) < 2 or not axis_model:
             continue
 
-        axis_model = _select_axis_model(axis_candidates, positive_only=positive_only)
         if not axis_model:
             continue
 
@@ -522,6 +703,10 @@ def _resolve_axis_model(gray, crop_x_start, axis_ratio, positive_only=False):
                 'axis_candidates': axis_candidates,
                 'axis_model': axis_model,
             }
+        if axis_ratio is None and _axis_model_is_confident(axis_model, gray.shape[0]):
+            return best
+        if axis_ratio is None and ratio == ratios[0] and _axis_model_is_usable(axis_model, gray.shape[0]):
+            return best
 
     return best
 
