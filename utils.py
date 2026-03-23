@@ -215,12 +215,17 @@ def find_media_file(directory, key):
             
     return None
 
-def extract_float(text):
-    """Extract all float numbers from text"""
-    # Pattern for scientific notation (e.g. 1.23e-04) and standard floats
-    return [float(x) for x in re.findall(r"-?\d+\.?\d*(?:[eE][-+]?\d+)?", text)]
+FLOAT_PATTERN = re.compile(r"-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
+FULL_SCI_PATTERN = re.compile(r"-?(?:\d+\.\d*|\.\d+|\d+)[eE][-+]?\d+$")
+DEFAULT_CROP_RATIO = 0.475
+DEFAULT_AXIS_RATIOS = (0.18, 0.20, 0.22, 0.25, 0.155)
 
-def run_tesseract_custom(image):
+def extract_float(text):
+    """Extract all float numbers from text, including decimals like .015 or -.015."""
+    normalized = (text or "").replace(",", ".").replace("−", "-").replace("—", "-")
+    return [float(x) for x in FLOAT_PATTERN.findall(normalized)]
+
+def run_tesseract_custom(image, psm=6, whitelist='0123456789.eE+-'):
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False, mode='wb') as f:
         temp_name = f.name
         f.close()
@@ -244,8 +249,8 @@ def run_tesseract_custom(image):
             pass
             
         cmd.extend(['--oem', '3'])
-        cmd.extend(['--psm', '6'])
-        cmd.extend(['-c', 'tessedit_char_whitelist=0123456789.eE+-'])
+        cmd.extend(['--psm', str(psm)])
+        cmd.extend(['-c', f'tessedit_char_whitelist={whitelist}'])
         cmd.extend(['-c', 'debug_file=NUL'])
         cmd.append('tsv') 
         
@@ -263,7 +268,7 @@ def run_tesseract_custom(image):
         text = stdout.decode('utf-8', errors='replace')
         
         reader = csv.DictReader(io.StringIO(text), delimiter='\t', quoting=csv.QUOTE_NONE)
-        data = {'text': [], 'top': [], 'height': [], 'left': [], 'width': []}
+        data = {'text': [], 'top': [], 'height': [], 'left': [], 'width': [], 'conf': []}
         
         for row in reader:
             data['text'].append(row.get('text', ''))
@@ -272,12 +277,14 @@ def run_tesseract_custom(image):
                 data['height'].append(int(row.get('height', 0)))
                 data['left'].append(int(row.get('left', 0)))
                 data['width'].append(int(row.get('width', 0)))
+                data['conf'].append(float(row.get('conf', -1)))
             except:
                 data['top'].append(0)
                 data['height'].append(0)
                 data['left'].append(0)
                 data['width'].append(0)
-                
+                data['conf'].append(-1.0)
+                 
         return data
         
     except Exception as e:
@@ -288,236 +295,494 @@ def run_tesseract_custom(image):
             try: os.remove(temp_name)
             except: pass
 
-def detect_curve_end_value(image_path, positive_only=False):
+def _normalize_numeric_text(text):
+    cleaned = (text or "").strip().replace(" ", "").replace(",", ".")
+    cleaned = cleaned.replace("−", "-").replace("—", "-")
+    if cleaned.startswith("."):
+        cleaned = f"0{cleaned}"
+    elif cleaned.startswith("-."):
+        cleaned = cleaned.replace("-.", "-0.", 1)
+    return cleaned
+
+def _prepare_axis_ocr_variants(axis_roi, scale=4):
+    roi_large = cv2.resize(axis_roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    roi_blur = cv2.GaussianBlur(roi_large, (3, 3), 0)
+
+    adaptive = cv2.adaptiveThreshold(
+        roi_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
+    )
+    adaptive = cv2.erode(adaptive, np.ones((2, 2), np.uint8), iterations=1)
+
+    _, otsu = cv2.threshold(roi_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return scale, [("adaptive", adaptive), ("otsu", otsu), ("gray", roi_large)]
+
+def _collect_axis_candidates(axis_roi, crop_x_start, scale=4, conf_threshold=25):
+    scale, variants = _prepare_axis_ocr_variants(axis_roi, scale=scale)
+    candidates = []
+
+    for source_name, processed in variants:
+        for psm in (6, 11):
+            data = run_tesseract_custom(processed, psm=psm)
+            if not data:
+                continue
+
+            num_boxes = len(data['text'])
+            for i in range(num_boxes):
+                text = _normalize_numeric_text(data['text'][i])
+                conf = data.get('conf', [-1] * num_boxes)[i]
+                if not text or conf < conf_threshold:
+                    continue
+
+                nums = extract_float(text)
+                if not nums:
+                    continue
+
+                val = nums[0]
+                x_rel = data['left'][i] / scale
+                y_rel = data['top'][i] / scale
+                w_box = max(1, int(round(data['width'][i] / scale)))
+                h_box = max(1, int(round(data['height'][i] / scale)))
+
+                candidates.append({
+                    'val': val,
+                    'text': text,
+                    'conf': conf,
+                    'source': f"{source_name}/psm{psm}",
+                    'x_center': x_rel + w_box / 2.0,
+                    'y_center': y_rel + h_box / 2.0,
+                    'rect': (int(round(crop_x_start + x_rel)), int(round(y_rel)), w_box, h_box),
+                })
+
+    deduped = []
+    for candidate in sorted(candidates, key=lambda item: item['conf'], reverse=True):
+        duplicate = False
+        for kept in deduped:
+            same_position = (
+                abs(candidate['x_center'] - kept['x_center']) <= 8
+                and abs(candidate['y_center'] - kept['y_center']) <= 6
+            )
+            same_value = abs(candidate['val'] - kept['val']) <= max(1e-4, abs(kept['val']) * 0.01)
+            if same_position and same_value:
+                duplicate = True
+                break
+        if not duplicate:
+            deduped.append(candidate)
+
+    return deduped
+
+def _fit_axis_model(aligned, positive_only=False):
+    if len(aligned) < 2:
+        return None
+
+    aligned = sorted(aligned, key=lambda item: item['y_center'])
+    best = None
+
+    for i in range(len(aligned) - 1):
+        for j in range(i + 1, len(aligned)):
+            top = aligned[i]
+            bottom = aligned[j]
+            y_span = bottom['y_center'] - top['y_center']
+            if y_span < 12:
+                continue
+
+            slope = (bottom['val'] - top['val']) / y_span
+            if abs(slope) < 1e-9 or slope >= 0:
+                continue
+
+            tol = max(abs(bottom['val'] - top['val']) * 0.08, abs(slope) * 8, 1e-4)
+            inliers = []
+            residual_sum = 0.0
+
+            for item in aligned:
+                predicted = top['val'] + slope * (item['y_center'] - top['y_center'])
+                residual = abs(item['val'] - predicted)
+                if residual <= tol:
+                    if positive_only and item['val'] < 0:
+                        continue
+                    inliers.append(item)
+                    residual_sum += residual
+
+            if len(inliers) < 2:
+                continue
+
+            y_values = [item['y_center'] for item in inliers]
+            score = (
+                len(inliers),
+                max(y_values) - min(y_values),
+                -residual_sum,
+                np.mean([item['conf'] for item in inliers]),
+            )
+
+            if (best is None) or (score > best['score']):
+                best = {'score': score, 'inliers': sorted(inliers, key=lambda item: item['y_center'])}
+
+    if not best:
+        return None
+
+    inliers = best['inliers']
+    y = np.array([item['y_center'] for item in inliers], dtype=np.float64)
+    v = np.array([item['val'] for item in inliers], dtype=np.float64)
+
+    if len(inliers) >= 3:
+        slope, intercept = np.polyfit(y, v, 1)
+    else:
+        slope = (v[-1] - v[0]) / (y[-1] - y[0])
+        intercept = v[0] - slope * y[0]
+
+    if abs(slope) < 1e-9 or slope >= 0:
+        return None
+
+    top = inliers[0]
+    bottom = inliers[-1]
+    if positive_only and (top['val'] < 0 or bottom['val'] < 0):
+        return None
+
+    return {
+        'inliers': inliers,
+        'slope': float(slope),
+        'intercept': float(intercept),
+        'y_top_px': float(top['y_center']),
+        'val_top': float(top['val']),
+        'y_bottom_px': float(bottom['y_center']),
+        'val_bottom': float(bottom['val']),
+    }
+
+def _select_axis_model(axis_candidates, positive_only=False):
+    if len(axis_candidates) < 2:
+        return None
+
+    bin_width = 20
+    bins = {}
+    for candidate in axis_candidates:
+        bin_idx = int(candidate['x_center'] / bin_width)
+        bins.setdefault(bin_idx, []).append(candidate)
+
+    best = None
+    for bin_idx, items in bins.items():
+        median_x = float(np.median([item['x_center'] for item in items]))
+        aligned = [item for item in axis_candidates if abs(item['x_center'] - median_x) < 15]
+        model = _fit_axis_model(aligned, positive_only=positive_only)
+        if not model:
+            continue
+
+        score = (
+            len(model['inliers']),
+            model['y_bottom_px'] - model['y_top_px'],
+            np.mean([item['conf'] for item in model['inliers']]),
+        )
+        if (best is None) or (score > best['score']):
+            best = {
+                'score': score,
+                'bin_idx': bin_idx,
+                'median_x': median_x,
+                **model,
+            }
+
+    return best
+
+def _score_axis_model(axis_model):
+    if not axis_model:
+        return None
+
+    inliers = axis_model.get('inliers', [])
+    full_sci = sum(1 for item in inliers if FULL_SCI_PATTERN.fullmatch(item.get('text', '')))
+    truncated_sci = sum(1 for item in inliers if 'e' in item.get('text', '').lower() and not FULL_SCI_PATTERN.fullmatch(item.get('text', '')))
+    return (
+        full_sci,
+        len(inliers),
+        axis_model['y_bottom_px'] - axis_model['y_top_px'],
+        -truncated_sci,
+        np.mean([item['conf'] for item in inliers]) if inliers else -1,
+    )
+
+def _resolve_axis_model(gray, crop_x_start, axis_ratio, positive_only=False):
+    ratios = [axis_ratio] if axis_ratio is not None else list(DEFAULT_AXIS_RATIOS)
+    best = None
+
+    for ratio in ratios:
+        axis_width = int(gray.shape[1] * ratio)
+        axis_roi = gray[:, :axis_width]
+        axis_candidates = _collect_axis_candidates(axis_roi, crop_x_start)
+        if len(axis_candidates) < 2:
+            continue
+
+        axis_model = _select_axis_model(axis_candidates, positive_only=positive_only)
+        if not axis_model:
+            continue
+
+        if positive_only:
+            axis_model = _maybe_rebase_positive_axis(axis_model, gray.shape[0])
+
+        score = _score_axis_model(axis_model)
+        if (best is None) or (score > best['score']):
+            best = {
+                'score': score,
+                'axis_ratio': ratio,
+                'axis_width': axis_width,
+                'axis_candidates': axis_candidates,
+                'axis_model': axis_model,
+            }
+
+    return best
+
+def _maybe_rebase_positive_axis(axis_model, roi_height):
+    if not axis_model or len(axis_model.get('inliers', [])) < 4:
+        return axis_model
+
+    vals = [item['val'] for item in axis_model['inliers']]
+    if any(val <= 0 for val in vals):
+        return axis_model
+
+    decimal_vals = [val for val in vals if abs(val - round(val)) > 1e-6 and abs(val) >= 1]
+    if len(decimal_vals) < max(4, len(vals) // 2):
+        return axis_model
+
+    integer_parts = [int(np.floor(val)) for val in decimal_vals]
+    if len(set(integer_parts)) != 1:
+        return axis_model
+
+    common_integer = integer_parts[0]
+    if common_integer <= 0:
+        return axis_model
+
+    current_zero_y = -axis_model['intercept'] / axis_model['slope']
+    target_zero_y = roi_height - 1
+
+    adjusted_items = []
+    for item in axis_model['inliers']:
+        adjusted = dict(item)
+        adjusted['val'] = item['val'] - common_integer
+        adjusted_items.append(adjusted)
+
+    adjusted_model = _fit_axis_model(adjusted_items, positive_only=True)
+    if not adjusted_model:
+        return axis_model
+
+    adjusted_zero_y = -adjusted_model['intercept'] / adjusted_model['slope']
+    current_distance = abs(current_zero_y - target_zero_y)
+    adjusted_distance = abs(adjusted_zero_y - target_zero_y)
+
+    if adjusted_distance + 40 < current_distance:
+        return {
+            **axis_model,
+            **adjusted_model,
+            'rebased_by': common_integer,
+        }
+
+    return axis_model
+
+def _mask_curve_noise(mask):
+    clean = mask.copy()
+    h_chart, w_chart = clean.shape[:2]
+
+    mask_h = int(h_chart * 0.10)
+    mask_w = int(w_chart * 0.45)
+    clean[0:mask_h, (w_chart - mask_w):] = 0
+
+    mask_bottom_h = int(h_chart * 0.12)
+    clean[(h_chart - mask_bottom_h):, :] = 0
+
+    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
+    clean = cv2.subtract(clean, cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_h))
+    clean = cv2.subtract(clean, cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_v))
+
+    return clean
+
+def _select_curve_component(mask):
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    h_chart, w_chart = mask.shape[:2]
+    best = None
+
+    for idx in range(1, num_labels):
+        x, y, w_comp, h_comp, area = stats[idx]
+        if area < 18 or w_comp < 4:
+            continue
+
+        aspect_ratio = h_comp / float(max(w_comp, 1))
+        if aspect_ratio > 10 and h_comp > (h_chart * 0.2):
+            continue
+
+        x_end = x + w_comp - 1
+        score = (
+            x_end,
+            min(w_comp, int(w_chart * 0.5)),
+            area,
+            -abs((y + h_comp / 2.0) - (h_chart / 2.0)),
+        )
+
+        if (best is None) or (score > best['score']):
+            best = {
+                'score': score,
+                'label': idx,
+                'bbox': (x, y, w_comp, h_comp),
+                'x_end': x_end,
+                'area': area,
+                'labels': labels,
+            }
+
+    return best
+
+def _detect_curve_endpoint(chart_bgr):
+    hsv = cv2.cvtColor(chart_bgr, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(chart_bgr, cv2.COLOR_BGR2GRAY)
+
+    color_mask = np.zeros_like(gray)
+    color_mask[(hsv[:, :, 1] > 35) & (hsv[:, :, 2] < 250)] = 255
+
+    _, dark_mask = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY_INV)
+
+    best = None
+    for mask_name, base_mask, bonus in (("color", color_mask, 5), ("dark", dark_mask, 0)):
+        clean_mask = _mask_curve_noise(base_mask)
+        component = _select_curve_component(clean_mask)
+        if not component:
+            continue
+
+        label_mask = component['labels'] == component['label']
+        ys, xs = np.where(label_mask)
+        if xs.size == 0:
+            continue
+
+        x_max = int(xs.max())
+        band = xs >= max(0, x_max - 4)
+        if band.sum() < 3:
+            band = xs >= max(0, x_max - 8)
+        if band.sum() == 0:
+            continue
+
+        band_points = {}
+        for x_val, y_val in zip(xs[band], ys[band]):
+            band_points.setdefault(int(x_val), []).append(float(y_val))
+
+        y_candidates = [float(np.median(values)) for values in band_points.values()]
+        y_end = float(np.median(y_candidates))
+
+        score = (
+            component['x_end'] + bonus,
+            component['bbox'][2],
+            component['area'],
+        )
+
+        if (best is None) or (score > best['score']):
+            best = {
+                'score': score,
+                'mask_name': mask_name,
+                'mask': clean_mask,
+                'bbox': component['bbox'],
+                'x_end': x_max,
+                'y_end': y_end,
+            }
+
+    return best
+
+def analyze_curve_image(image_path, positive_only=False, crop_ratio=DEFAULT_CROP_RATIO, axis_ratio=None):
     """
-    Detects the Y-coordinate value of the curve's end point in the right half of the image.
+    Analyze a curve image and return OCR/curve debug details plus the mapped value.
     """
     if not os.path.exists(image_path):
-        return None
-    
-    # Use imdecode to handle paths with non-ascii characters
+        return {'ok': False, 'error': f'Image not found: {image_path}'}
+
     try:
         img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
     except Exception:
-        return None
-        
+        img = None
+
     if img is None:
-        return None
-        
+        return {'ok': False, 'error': f'Failed to decode image: {image_path}'}
+
     h, w = img.shape[:2]
-    
-    # 1. Crop Right Half (Optimized based on user feedback)
-    # Crop Start X: 47.5%
-    crop_x_start = int(w * 0.475)
+    crop_x_start = int(w * crop_ratio)
     roi = img[:, crop_x_start:]
-    roi_h, roi_w = roi.shape[:2]
-    
-    # 2. Preprocess
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    
-    # 3. OCR Y-Axis (Left side of ROI)
-    # Axis Zone Width: 15.5%
-    axis_width = int(roi_w * 0.155)
-    axis_roi = gray[:, :axis_width]
-    
-    # Upscale for better OCR
-    scale = 4
-    roi_large = cv2.resize(axis_roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    
-    # 1. Gaussian Blur
-    roi_blur = cv2.GaussianBlur(roi_large, (3, 3), 0)
-    
-    # 2. Adaptive Threshold
-    roi_thresh = cv2.adaptiveThreshold(roi_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                     cv2.THRESH_BINARY, 31, 10)
-                                     
-    # 3. Erosion (Thicken text)
-    kernel = np.ones((2,2), np.uint8)
-    roi_processed = cv2.erode(roi_thresh, kernel, iterations=1)
-    
-    data = run_tesseract_custom(roi_processed)
-    if not data:
-        return None
-        
-    y_values = []
-    num_boxes = len(data['text'])
-    for i in range(num_boxes):
-        text = data['text'][i].strip()
-        if not text: continue
-        
-        nums = extract_float(text)
-        if nums:
-            val = nums[0]
-            # data['top'] and ['height'] are in scaled coordinates
-            # Center Y of the text box relative to original ROI
-            y_center = (data['top'][i] + data['height'][i]/2) / scale
-            
-            # X center relative to ROI (for alignment check)
-            x_center = (data['left'][i] + data['width'][i]/2) / scale
-            
-            y_values.append({
-                'val': val,
-                'y_center': y_center,
-                'x_center': x_center
-            })
-            
-    if len(y_values) < 2:
-        log(f"OCR failed to find enough Y-axis labels in {image_path}")
-        return None
-        
-    bin_width = 20
-    bins = {}
-    
-    for v in y_values:
-        bin_idx = int(v['x_center'] / bin_width)
-        if bin_idx not in bins:
-            bins[bin_idx] = []
-        bins[bin_idx].append(v)
-        
-    candidate_bins = sorted(bins.items(), key=lambda x: (-len(x[1]), x[0]))
-    
-    if not candidate_bins:
-        log(f"Could not identify a valid Y-axis column in {image_path}")
-        return None
-        
-    # 4. Find Curve End (Rightmost dark pixel)
-    # Exclude axis area to avoid detecting text as curve
-    chart_area = gray[:, axis_width:] 
-    
-    # Threshold: assume curve is dark (< 200) on light background
-    _, binary = cv2.threshold(chart_area, 200, 255, cv2.THRESH_BINARY_INV)
-    
-    # Remove grid lines (thin horizontal/vertical lines)
-    # Increase kernel size for vertical lines to catch the green time indicator
-    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
-    detected_lines_h = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_h)
-    
-    # Increased height to 50 to better catch long vertical indicator lines
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50)) 
-    detected_lines_v = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_v)
-    
-    clean_binary = cv2.subtract(binary, detected_lines_h)
-    clean_binary = cv2.subtract(clean_binary, detected_lines_v)
-    
-    # --- Mask Top-Right Corner (Legend/Label Area) ---
-    # Avoid detecting legend lines as curve end
-    h_chart, w_chart = clean_binary.shape[:2]
-    # Mask area: Top 8% height, Right 45% width (Adjust as needed)
-    mask_h = int(h_chart * 0.08)
-    mask_w = int(w_chart * 0.45)
-    clean_binary[0:mask_h, (w_chart - mask_w):] = 0
-    
-    # --- Mask Bottom (X-Axis/Border Area) ---
-    # Avoid detecting X-axis ticks or bottom border as curve end
-    # Mask bottom 12%
-    mask_bottom_h = int(h_chart * 0.12)
-    clean_binary[(h_chart - mask_bottom_h):, :] = 0
-    # -------------------------------------------------
 
-    # --- Filter Vertical Lines by Aspect Ratio (Connected Components) ---
-    # Sometimes morphology misses lines if they are broken or slightly thick
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(clean_binary, connectivity=8)
-    
-    for i in range(1, num_labels): # Skip background (0)
-        x, y, w, h, area = stats[i]
-        
-        # Aspect Ratio = Height / Width
-        aspect_ratio = h / float(w) if w > 0 else 0
-        
-        # Heuristic: Vertical indicator lines are tall and narrow
-        # If AR > 10 and height is significant (> 20% of chart height), remove it
-        if aspect_ratio > 10 and h > (h_chart * 0.2):
-             # Set pixels of this component to 0
-             clean_binary[labels == i] = 0
-             log(f"DEBUG: Removed vertical line artifact (AR={aspect_ratio:.1f}, H={h})")
-    # ------------------------------------------------------------------
+    axis_result = _resolve_axis_model(gray, crop_x_start, axis_ratio, positive_only=positive_only)
+    if not axis_result:
+        return {
+            'ok': False,
+            'error': 'OCR failed to find enough Y-axis labels.',
+            'img': img,
+            'crop_x_start': crop_x_start,
+            'axis_width': int(roi.shape[1] * (axis_ratio or DEFAULT_AXIS_RATIOS[0])),
+            'axis_candidates': [],
+        }
 
-    points = cv2.findNonZero(clean_binary)
-    if points is None:
-        log(f"No curve detected in {image_path}")
+    axis_width = axis_result['axis_width']
+    axis_candidates = axis_result['axis_candidates']
+    axis_model = axis_result['axis_model']
+    axis_ratio = axis_result['axis_ratio']
+
+    chart_start_x = crop_x_start + axis_width
+    chart_bgr = roi[:, axis_width:]
+    curve = _detect_curve_endpoint(chart_bgr)
+    if not curve:
+        return {
+            'ok': False,
+            'error': 'No curve detected.',
+            'img': img,
+            'crop_x_start': crop_x_start,
+            'axis_width': axis_width,
+            'axis_candidates': axis_candidates,
+            'axis_model': axis_model,
+            'chart_start_x': chart_start_x,
+        }
+
+    y_end_roi = curve['y_end']
+    value = axis_model['slope'] * y_end_roi + axis_model['intercept']
+    if positive_only and axis_model['val_top'] >= 0 and axis_model['val_bottom'] >= 0 and value < 0:
+        return {
+            'ok': False,
+            'error': 'Mapped value became negative under positive-only mode.',
+            'img': img,
+            'crop_x_start': crop_x_start,
+            'axis_width': axis_width,
+            'axis_candidates': axis_candidates,
+            'axis_model': axis_model,
+            'chart_start_x': chart_start_x,
+            'curve': curve,
+        }
+
+    return {
+        'ok': True,
+        'value': float(value),
+        'img': img,
+        'crop_x_start': crop_x_start,
+        'axis_ratio': axis_ratio,
+        'axis_width': axis_width,
+        'axis_candidates': axis_candidates,
+        'axis_model': axis_model,
+        'chart_start_x': chart_start_x,
+        'curve': curve,
+    }
+
+def detect_curve_end_value(image_path, positive_only=False, crop_ratio=DEFAULT_CROP_RATIO, axis_ratio=None):
+    """
+    Detect the value of the curve end point on the right-side chart.
+    """
+    result = analyze_curve_image(
+        image_path,
+        positive_only=positive_only,
+        crop_ratio=crop_ratio,
+        axis_ratio=axis_ratio,
+    )
+    if not result.get('ok'):
+        log(result.get('error', f"Curve analysis failed for {image_path}"))
         return None
-        
-    # points is (N, 1, 2) array of (x, y) relative to chart_area
-    points = points[:, 0, :]
-    
-    # Sort by x descending (rightmost first)
-    points = points[points[:, 0].argsort()[::-1]]
-    
-    # User Request: Use the single last point (rightmost)
-    # points[0] is the rightmost point (max x)
-    rightmost_point = points[0]
-    
-    y_end_avg_chart = rightmost_point[1]
-    log(f"DEBUG: Curve End Y (relative to chart): {y_end_avg_chart} (from point {rightmost_point})")
-    
-    # Map back to ROI coordinates (chart_area is offset by axis_width in X, but Y is same)
-    y_end_roi = y_end_avg_chart
-    
-    def build_axis_values(items):
-        selected_x = [v['x_center'] for v in items]
-        median_x = np.median(selected_x)
-        aligned = []
-        for v in y_values:
-            if abs(v['x_center'] - median_x) < 15:
-                if (not positive_only) or v['val'] >= 0:
-                    aligned.append((v['y_center'], v['val']))
-        if len(aligned) < 2:
-            return None
-        aligned.sort(key=lambda x: x[0])
-        if len(aligned) > 2:
-            slopes = []
-            for i in range(len(aligned) - 1):
-                dy = aligned[i+1][0] - aligned[i][0]
-                dv = aligned[i+1][1] - aligned[i][1]
-                if abs(dv) > 1e-9:
-                    slopes.append(dy / dv)
-            if slopes:
-                median_slope = np.median(slopes)
-                mid_idx = len(aligned) // 2
-                pivot = aligned[mid_idx]
-                filtered = []
-                for p in aligned:
-                    if p == pivot:
-                        filtered.append(p)
-                        continue
-                    dy = p[0] - pivot[0]
-                    dv = p[1] - pivot[1]
-                    if abs(dv) < 1e-9:
-                        continue
-                    slope = dy / dv
-                    if (slope * median_slope > 0) and (0.33 < abs(slope / median_slope) < 3.0):
-                        filtered.append(p)
-                if len(filtered) >= 2:
-                    aligned = filtered
-                    aligned.sort(key=lambda x: x[0])
-        y_top_px, val_top = aligned[0]
-        y_bottom_px, val_bottom = aligned[-1]
-        pixel_range = y_bottom_px - y_top_px
-        value_range = val_top - val_bottom
-        if abs(pixel_range) < 10 or abs(value_range) == 0:
-            return None
-        return aligned, y_top_px, val_top, y_bottom_px, val_bottom
-    
-    chosen = None
-    for bin_idx, items in candidate_bins:
-        axis_data = build_axis_values(items)
-        if not axis_data:
-            continue
-        aligned, y_top_px, val_top, y_bottom_px, val_bottom = axis_data
-        slope = (val_bottom - val_top) / (y_bottom_px - y_top_px)
-        value = val_top + slope * (y_end_roi - y_top_px)
-        if positive_only and val_top >= 0 and val_bottom >= 0 and value < 0:
-            log(f"DEBUG: Positive-only enabled; negative result {value} from bin {bin_idx}, retrying")
-            continue
-        chosen = (value, y_top_px, val_top, y_bottom_px, val_bottom, aligned)
-        break
-    
-    if not chosen:
-        log("Invalid axis detected (no valid positive mapping)")
-        return None
-    
-    value, y_top_px, val_top, y_bottom_px, val_bottom, y_values = chosen
-    log(f"DEBUG: OCR found {len(y_values)} values: {y_values}")
-    log(f"DEBUG: Top: {val_top} at {y_top_px}px, Bottom: {val_bottom} at {y_bottom_px}px")
-    
-    return value
+
+    axis_model = result['axis_model']
+    curve = result['curve']
+    log(
+        "DEBUG: Curve end from "
+        f"{curve['mask_name']} mask at y={curve['y_end']:.1f}, x={curve['x_end']}"
+    )
+    log(
+        "DEBUG: Axis inliers "
+        f"{[(round(item['y_center'], 1), item['val']) for item in axis_model['inliers']]}"
+    )
+    log(
+        "DEBUG: Top/Bottom "
+        f"{axis_model['val_top']}@{axis_model['y_top_px']:.1f}px -> "
+        f"{axis_model['val_bottom']}@{axis_model['y_bottom_px']:.1f}px"
+    )
+
+    return result['value']
