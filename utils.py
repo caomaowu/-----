@@ -827,7 +827,7 @@ def _detect_legend_rect(chart_bgr):
 
     return (x0, y0, x1 - x0, y1 - y0)
 
-def _mask_curve_noise(mask, legend_rect=None):
+def _mask_curve_noise(mask, legend_rect=None, remove_horizontal=True, remove_vertical=True):
     clean = mask.copy()
     h_chart, w_chart = clean.shape[:2]
 
@@ -843,10 +843,12 @@ def _mask_curve_noise(mask, legend_rect=None):
     mask_bottom_h = int(h_chart * 0.12)
     clean[(h_chart - mask_bottom_h):, :] = 0
 
-    kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
-    kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
-    clean = cv2.subtract(clean, cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_h))
-    clean = cv2.subtract(clean, cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_v))
+    if remove_horizontal:
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+        clean = cv2.subtract(clean, cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_h))
+    if remove_vertical:
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
+        clean = cv2.subtract(clean, cv2.morphologyEx(clean, cv2.MORPH_OPEN, kernel_v))
 
     return clean
 
@@ -895,47 +897,63 @@ def _detect_curve_endpoint(chart_bgr):
     _, dark_mask = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY_INV)
 
     best = None
+    cleanup_variants = (
+        ("strict", True, True, 4),
+        ("soft", False, True, 2),
+        ("minimal", False, False, 0),
+    )
+
     for mask_name, base_mask, bonus in (("color", color_mask, 5), ("dark", dark_mask, 0)):
-        clean_mask = _mask_curve_noise(base_mask, legend_rect=legend_rect)
-        component = _select_curve_component(clean_mask)
-        if not component:
-            continue
+        variants = cleanup_variants if mask_name == "color" else (cleanup_variants[0],)
+        for cleanup_name, remove_horizontal, remove_vertical, cleanup_bonus in variants:
+            clean_mask = _mask_curve_noise(
+                base_mask,
+                legend_rect=legend_rect,
+                remove_horizontal=remove_horizontal,
+                remove_vertical=remove_vertical,
+            )
+            component = _select_curve_component(clean_mask)
+            if not component:
+                continue
 
-        label_mask = component['labels'] == component['label']
-        ys, xs = np.where(label_mask)
-        if xs.size == 0:
-            continue
+            label_mask = component['labels'] == component['label']
+            ys, xs = np.where(label_mask)
+            if xs.size == 0:
+                continue
 
-        x_max = int(xs.max())
-        band = xs >= max(0, x_max - 4)
-        if band.sum() < 3:
-            band = xs >= max(0, x_max - 8)
-        if band.sum() == 0:
-            continue
+            x_max = int(xs.max())
+            band = xs >= max(0, x_max - 4)
+            if band.sum() < 3:
+                band = xs >= max(0, x_max - 8)
+            if band.sum() == 0:
+                continue
 
-        band_points = {}
-        for x_val, y_val in zip(xs[band], ys[band]):
-            band_points.setdefault(int(x_val), []).append(float(y_val))
+            band_points = {}
+            for x_val, y_val in zip(xs[band], ys[band]):
+                band_points.setdefault(int(x_val), []).append(float(y_val))
 
-        y_candidates = [float(np.median(values)) for values in band_points.values()]
-        y_end = float(np.median(y_candidates))
+            y_candidates = [float(np.median(values)) for values in band_points.values()]
+            y_end = float(np.median(y_candidates))
 
-        score = (
-            component['x_end'] + bonus,
-            component['bbox'][2],
-            component['area'],
-        )
+            score = (
+                component['x_end'] + bonus + cleanup_bonus,
+                component['bbox'][2],
+                component['area'],
+            )
 
-        if (best is None) or (score > best['score']):
-            best = {
-                'score': score,
-                'mask_name': mask_name,
-                'mask': clean_mask,
-                'legend_rect': legend_rect,
-                'bbox': component['bbox'],
-                'x_end': x_max,
-                'y_end': y_end,
-            }
+            if (best is None) or (score > best['score']):
+                best = {
+                    'score': score,
+                    'mask_name': f"{mask_name}/{cleanup_name}",
+                    'mask': clean_mask,
+                    'legend_rect': legend_rect,
+                    'bbox': component['bbox'],
+                    'x_end': x_max,
+                    'y_end': y_end,
+                }
+
+            if mask_name == "color" and cleanup_name == "strict":
+                break
 
     return best
 
