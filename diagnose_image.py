@@ -270,6 +270,26 @@ class DiagnoseApp:
             x, y, w_box, h_box = curve['bbox']
             x_global = chart_start_x + x
             cv2.rectangle(debug_img, (x_global, y), (x_global + w_box, y + h_box), (255, 0, 0), 2)
+            legend_rect = curve.get('legend_rect')
+            if legend_rect:
+                lx, ly, lw_box, lh_box = legend_rect
+                legend_x_global = chart_start_x + lx
+                cv2.rectangle(
+                    debug_img,
+                    (legend_x_global, ly),
+                    (legend_x_global + lw_box, ly + lh_box),
+                    (0, 165, 255),
+                    2,
+                )
+                cv2.putText(
+                    debug_img,
+                    "Legend",
+                    (legend_x_global, max(20, ly - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 165, 255),
+                    1,
+                )
             endpoint = (chart_start_x + int(round(curve['x_end'])), int(round(curve['y_end'])))
             cv2.circle(debug_img, endpoint, 6, (0, 0, 255), -1)
             cv2.line(debug_img, (0, endpoint[1]), (w, endpoint[1]), (255, 0, 255), 1)
@@ -291,6 +311,8 @@ class DiagnoseApp:
         self.log(f"Axis Inliers: {len(axis_model['inliers'])}")
         self.log(f"Top: {axis_model['val_top']} @ {axis_model['y_top_px']:.1f}px")
         self.log(f"Bottom: {axis_model['val_bottom']} @ {axis_model['y_bottom_px']:.1f}px")
+        if curve.get('legend_rect'):
+            self.log(f"Legend Rect: {curve['legend_rect']}")
         self.log(f"Curve End Y: {curve['y_end']:.1f} ({curve['mask_name']})")
         self.log(f"RESULT: {result['value']:.4e}")
 

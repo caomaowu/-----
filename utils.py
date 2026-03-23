@@ -756,13 +756,89 @@ def _maybe_rebase_positive_axis(axis_model, roi_height):
 
     return axis_model
 
-def _mask_curve_noise(mask):
+def _detect_legend_rect(chart_bgr):
+    h_chart, w_chart = chart_bgr.shape[:2]
+    search_h = max(1, int(h_chart * 0.18))
+    search_x = int(w_chart * 0.52)
+    roi = chart_bgr[:search_h, search_x:]
+    if roi.size == 0:
+        return None
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    # Legend border/text are usually dark and low-saturation.
+    neutral_dark = np.zeros_like(gray)
+    neutral_dark[(gray < 210) & (hsv[:, :, 1] < 90)] = 255
+
+    grouped = cv2.morphologyEx(
+        neutral_dark,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 5)),
+    )
+    grouped = cv2.dilate(
+        grouped,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
+        iterations=1,
+    )
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(grouped, connectivity=8)
+    rects = []
+
+    for idx in range(1, num_labels):
+        x, y, w_comp, h_comp, area = stats[idx]
+        if area < 80 or w_comp < 30 or h_comp < 10:
+            continue
+        if (x + w_comp) < (roi.shape[1] * 0.45):
+            continue
+        if y > (search_h * 0.45):
+            continue
+
+        label_mask = labels == idx
+        ys, xs = np.where((neutral_dark > 0) & label_mask)
+        if xs.size == 0:
+            continue
+
+        rects.append((
+            int(xs.min()) + search_x,
+            int(ys.min()),
+            int(xs.max() - xs.min() + 1),
+            int(ys.max() - ys.min() + 1),
+        ))
+
+    if not rects:
+        return None
+
+    x0 = min(rect[0] for rect in rects)
+    y0 = min(rect[1] for rect in rects)
+    x1 = max(rect[0] + rect[2] for rect in rects)
+    y1 = max(rect[1] + rect[3] for rect in rects)
+
+    pad_x = max(8, int(w_chart * 0.01))
+    pad_y = max(6, int(h_chart * 0.008))
+
+    x0 = max(0, x0 - pad_x)
+    y0 = max(0, y0 - pad_y)
+    x1 = min(w_chart, x1 + pad_x)
+    y1 = min(h_chart, y1 + pad_y)
+
+    if (x1 - x0) < 40 or (y1 - y0) < 12:
+        return None
+
+    return (x0, y0, x1 - x0, y1 - y0)
+
+def _mask_curve_noise(mask, legend_rect=None):
     clean = mask.copy()
     h_chart, w_chart = clean.shape[:2]
 
-    mask_h = int(h_chart * 0.10)
-    mask_w = int(w_chart * 0.45)
-    clean[0:mask_h, (w_chart - mask_w):] = 0
+    if legend_rect:
+        x, y, w_rect, h_rect = legend_rect
+        clean[y:(y + h_rect), x:(x + w_rect)] = 0
+
+    # Keep a very small top-right safety strip for tiny legend artifacts that may sit just outside the detected box.
+    safety_h = int(h_chart * 0.04)
+    safety_w = int(w_chart * 0.18)
+    clean[0:safety_h, (w_chart - safety_w):] = 0
 
     mask_bottom_h = int(h_chart * 0.12)
     clean[(h_chart - mask_bottom_h):, :] = 0
@@ -811,6 +887,7 @@ def _select_curve_component(mask):
 def _detect_curve_endpoint(chart_bgr):
     hsv = cv2.cvtColor(chart_bgr, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(chart_bgr, cv2.COLOR_BGR2GRAY)
+    legend_rect = _detect_legend_rect(chart_bgr)
 
     color_mask = np.zeros_like(gray)
     color_mask[(hsv[:, :, 1] > 35) & (hsv[:, :, 2] < 250)] = 255
@@ -819,7 +896,7 @@ def _detect_curve_endpoint(chart_bgr):
 
     best = None
     for mask_name, base_mask, bonus in (("color", color_mask, 5), ("dark", dark_mask, 0)):
-        clean_mask = _mask_curve_noise(base_mask)
+        clean_mask = _mask_curve_noise(base_mask, legend_rect=legend_rect)
         component = _select_curve_component(clean_mask)
         if not component:
             continue
@@ -854,6 +931,7 @@ def _detect_curve_endpoint(chart_bgr):
                 'score': score,
                 'mask_name': mask_name,
                 'mask': clean_mask,
+                'legend_rect': legend_rect,
                 'bbox': component['bbox'],
                 'x_end': x_max,
                 'y_end': y_end,
