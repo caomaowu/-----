@@ -18,5 +18,26 @@
         "scale": 1.0,
         "unit": "%",
         "format": "{:.2f}"
+    },
+    "tijijuanqizuo": {
+        "scale": 1000.0,
+        "unit": "g",
+        "format": "{:.2f}"
+    },
+    "tijijuanqiyou": {
+        "scale": 1000.0,
+        "unit": "g",
+        "format": "{:.2f}"
+    },
+    "tijiyanghuazuo":{
+        "scale": 1000.0,
+        "unit": "g",
+        "format": "{:.2f}"
+    },
+    "tijiyanghuayou":{
+        "scale": 1000.0,
+        "unit": "g",
+        "format": "{:.2f}"
     }
 }
+
